@@ -1,16 +1,14 @@
 // ══════════════════════════════════════════════════════════════
-//  presenter.js — 303-XMD advanced command handler
+//  presenter.js — 303-XMD command handler (multi-user aware)
+//  Every message carries its own per-session config.
 // ══════════════════════════════════════════════════════════════
+
+"use strict";
 
 const fs = require("fs");
 const path = require("path");
 const CONFIG = require("./config");
-const {
-  isSessionOwner,
-  isGlobalOwner,
-  jidToNumber,
-  getText,
-} = require("./utils");
+const { isSessionOwner, isGlobalOwner, jidToNumber, getText } = require("./utils");
 
 const COMMANDS = new Map();
 const ALIASES = new Map();
@@ -31,15 +29,16 @@ function normalizeConfig(config) {
   const c = config || {};
   return {
     ...c,
-    prefix: c.prefix || CONFIG.PREFIX || ".",
-    workMode: (c.workMode || CONFIG.WORK_MODE || "public").toLowerCase(),
-    ownerNumber: c.ownerNumber || CONFIG.OWNER_NUMBER || "",
-    botName: c.botName || CONFIG.BOT_NAME || "Bot",
-    global: c.global || {},
-    overrides: c.overrides || {},
+    prefix:     c.prefix     || CONFIG.PREFIX || ".",
+    workMode:   (c.workMode  || CONFIG.WORK_MODE || "public").toLowerCase(),
+    ownerNumber:c.ownerNumber|| CONFIG.OWNER_NUMBER || "",
+    botName:    c.botName    || CONFIG.BOT_NAME || "Bot",
+    global:     c.global     || {},
+    overrides:  c.overrides  || {},
   };
 }
 
+// ─── Loader ───────────────────────────────────────────────
 function loadCommand(filePath) {
   const fileName = path.basename(filePath, ".js");
   let mod;
@@ -71,29 +70,20 @@ function loadCommand(filePath) {
       privateOnly: mod.privateOnly === true,
       hidden: mod.hidden === true,
       execute: mod.execute || mod.run,
-      onLoad: mod.onLoad,
-      onUnload: mod.onUnload,
-      onMessage: mod.onMessage,
-      onPresence: mod.onPresence,
-      onCall: mod.onCall,
-      onDelete: mod.onDelete,
+      onLoad: mod.onLoad, onUnload: mod.onUnload,
+      onMessage: mod.onMessage, onPresence: mod.onPresence,
+      onCall: mod.onCall, onDelete: mod.onDelete,
       raw: mod,
     };
   } else {
     log.warn(`${fileName} exports invalid shape — skipped`);
     return null;
   }
-
   return cmd;
 }
 
 function registerCommand(cmd) {
   if (!cmd) return;
-  for (const a of cmd.aliases) {
-    if (COMMANDS.has(a) && a !== cmd.name) {
-      log.warn(`alias "${a}" of "${cmd.name}" shadows command "${a}"`);
-    }
-  }
   const old = COMMANDS.get(cmd.name);
   if (old) for (const a of old.aliases) ALIASES.delete(a);
   COMMANDS.set(cmd.name, cmd);
@@ -101,10 +91,8 @@ function registerCommand(cmd) {
   if (typeof cmd.onLoad === "function") {
     try { cmd.onLoad(); } catch (e) { log.error(`onLoad ${cmd.name}:`, e.message); }
   }
-  log.info(
-    `loaded command: ${cmd.name}` +
-    (cmd.aliases.length ? ` (aliases: ${cmd.aliases.join(", ")})` : "")
-  );
+  log.info(`loaded command: ${cmd.name}` +
+    (cmd.aliases.length ? ` (aliases: ${cmd.aliases.join(", ")})` : ""));
 }
 
 function unregisterCommand(name) {
@@ -124,35 +112,30 @@ function loadAllCommands() {
     log.warn(`commands/ folder did not exist — created it`);
     return;
   }
-  // clear registry for a clean reload
   for (const name of [...COMMANDS.keys()]) unregisterCommand(name);
   ALIASES.clear();
-
-  const files = fs.readdirSync(COMMAND_DIR).filter((f) => f.endsWith(".js"));
-  for (const f of files) registerCommand(loadCommand(path.join(COMMAND_DIR, f)));
+  for (const f of fs.readdirSync(COMMAND_DIR).filter((f) => f.endsWith(".js"))) {
+    registerCommand(loadCommand(path.join(COMMAND_DIR, f)));
+  }
   log.info(`✅ loaded ${COMMANDS.size} commands`);
 }
 
 function startWatcher() {
   if (!fs.existsSync(COMMAND_DIR)) return;
   const timers = new Map();
-  const scheduleReload = (file) => {
+  const schedule = (file) => {
     if (timers.has(file)) clearTimeout(timers.get(file));
     timers.set(file, setTimeout(() => {
       timers.delete(file);
       const full = path.join(COMMAND_DIR, file);
-      if (!fs.existsSync(full)) {
-        unregisterCommand(path.basename(file, ".js"));
-        return;
-      }
+      if (!fs.existsSync(full)) { unregisterCommand(path.basename(file, ".js")); return; }
       log.info(`🔄 reloading: ${file}`);
       registerCommand(loadCommand(full));
     }, 300));
   };
   try {
-    fs.watch(COMMAND_DIR, (_event, filename) => {
-      if (!filename || !filename.endsWith(".js")) return;
-      scheduleReload(filename);
+    fs.watch(COMMAND_DIR, (_e, filename) => {
+      if (filename && filename.endsWith(".js")) schedule(filename);
     });
     log.info(`👀 watching commands/ for changes`);
   } catch (e) {
@@ -160,12 +143,14 @@ function startWatcher() {
   }
 }
 
+// ─── Feature toggles ──────────────────────────────────────
 function eff(config, key) {
   const ov = config?.overrides?.[key];
   if (ov !== undefined) return ov === true;
   return config?.global?.[key] === true;
 }
 
+// ─── Group metadata cache ─────────────────────────────────
 const META_CACHE = new Map();
 const META_CACHE_MAX = 500;
 async function safeGroupMetadata(conn, jid) {
@@ -175,8 +160,7 @@ async function safeGroupMetadata(conn, jid) {
   try {
     const data = await conn.groupMetadata(jid);
     if (META_CACHE.size >= META_CACHE_MAX) {
-      const firstKey = META_CACHE.keys().next().value;
-      META_CACHE.delete(firstKey);
+      META_CACHE.delete(META_CACHE.keys().next().value);
     }
     META_CACHE.set(jid, { data, ts: now });
     return data;
@@ -185,6 +169,9 @@ async function safeGroupMetadata(conn, jid) {
   }
 }
 
+// ══════════════════════════════════════════════════════════════
+//  MAIN
+// ══════════════════════════════════════════════════════════════
 async function handleMessage({ conn, m, sessionId, config: rawConfig }) {
   const config = normalizeConfig(rawConfig);
   const msg = m.messages?.[0];
@@ -202,21 +189,21 @@ async function handleMessage({ conn, m, sessionId, config: rawConfig }) {
   const isFromMe = !!msg.key.fromMe;
   const prefix = config.prefix;
 
-  const senderIsOwner =
-    jidToNumber(sender) === jidToNumber(config.ownerNumber) ||
-    isSessionOwner(sender, config);
-  const senderIsGlobalOwner = isGlobalOwner(sender);
-  const isPrivileged = senderIsOwner || senderIsGlobalOwner;
+  // ── Owner resolution (multi-user safe) ────────────────
+  const senderIsSessionOwner = isSessionOwner(sender, config);
+  // FIX M8: global owners only pierce when session opted in
+  const allowGlobal = config.global?.ALLOW_GLOBAL_OWNER === true;
+  const senderIsGlobalOwner = allowGlobal && isGlobalOwner(sender);
+  const isPrivileged = senderIsSessionOwner || senderIsGlobalOwner;
 
-  // AUTO-READ
   if (eff(config, "AUTO_READ")) {
     try { await conn.readMessages([msg.key]); } catch {}
   }
 
-  // Work-mode gate: public = everyone, private = owner only
+  // Work-mode gate
   if (config.workMode === "private" && !isPrivileged) return;
 
-  // onMessage hooks (skip own messages, run in parallel)
+  // onMessage hooks (parallel, skip own messages)
   if (!isFromMe) {
     const tasks = [];
     for (const cmd of COMMANDS.values()) {
@@ -232,14 +219,12 @@ async function handleMessage({ conn, m, sessionId, config: rawConfig }) {
 
   if (!text || isFromMe) return;
 
-  // AUTO-REACT
   if (eff(config, "AUTO_REACT") && !text.startsWith(prefix)) {
     try {
       await conn.sendMessage(from, { react: { text: "🔥", key: msg.key } });
     } catch {}
   }
 
-  // Command parsing
   if (!text.startsWith(prefix)) return;
   const body = text.slice(prefix.length).trim();
   if (!body) return;
@@ -251,7 +236,6 @@ async function handleMessage({ conn, m, sessionId, config: rawConfig }) {
   const cmd = COMMANDS.get(canonical);
   if (!cmd) { log.debug(`unknown command: ${rawName}`); return; }
 
-  // Permission gates
   if (cmd.ownerOnly && !isPrivileged) {
     return conn.sendMessage(from, { text: "🔒 Owner only." }, { quoted: msg });
   }
@@ -271,7 +255,6 @@ async function handleMessage({ conn, m, sessionId, config: rawConfig }) {
     return conn.sendMessage(from, { text: "📩 Private chat only." }, { quoted: msg });
   }
 
-  // Typing (only around execution)
   const typingOn = eff(config, "AUTO_TYPING") && !isFromMe;
   if (typingOn) {
     try { await conn.sendPresenceUpdate("composing", from); } catch {}
@@ -290,6 +273,7 @@ async function handleMessage({ conn, m, sessionId, config: rawConfig }) {
     typing: () => conn.sendPresenceUpdate("composing", from).catch(() => {}),
     stopTyping: () => conn.sendPresenceUpdate("paused", from).catch(() => {}),
     isOwner: isPrivileged,
+    isSessionOwner: senderIsSessionOwner,
     isGlobalOwner: senderIsGlobalOwner,
     groupMetadata: () => safeGroupMetadata(conn, from),
     log,
@@ -307,6 +291,7 @@ async function handleMessage({ conn, m, sessionId, config: rawConfig }) {
   }
 }
 
+// ─── Status handler ───────────────────────────────────────
 async function handleStatus({ conn, msg, sessionId, config }) {
   try {
     if (eff(config, "AUTO_STATUS_VIEW")) {
@@ -326,39 +311,32 @@ async function handleStatus({ conn, msg, sessionId, config }) {
       const poster = msg.key.participant || msg.key.remoteJid;
       await conn.sendMessage(poster, { text: config.global.STATUS_REPLY_TEXT }).catch(() => {});
     }
-  } catch (e) {
-    log.debug(`status handler:`, e.message);
-  }
+  } catch (e) { log.debug(`status handler:`, e.message); }
 }
 
 async function onPresenceUpdate({ conn, presence, sessionId, config }) {
   for (const cmd of COMMANDS.values()) {
     if (typeof cmd.onPresence !== "function") continue;
-    try {
-      await cmd.onPresence({ conn, presence, sessionId, config });
-    } catch (e) {
-      log.error(`onPresence ${cmd.name}:`, e.message);
-    }
+    try { await cmd.onPresence({ conn, presence, sessionId, config }); }
+    catch (e) { log.error(`onPresence ${cmd.name}:`, e.message); }
   }
 }
 
 async function onCall({ conn, calls, sessionId, config }) {
   if (!eff(config, "ANTICALL")) return;
+  const allowGlobal = config?.global?.ALLOW_GLOBAL_OWNER === true;
   for (const call of calls) {
     try {
-      // Never reject the owner's own calls
-      if (
+      const isOwner =
         jidToNumber(call.from) === jidToNumber(config?.ownerNumber) ||
         isSessionOwner(call.from, config) ||
-        isGlobalOwner(call.from)
-      ) continue;
+        (allowGlobal && isGlobalOwner(call.from));
+      if (isOwner) continue;
       await conn.rejectCall(call.id, call.from);
       await conn.sendMessage(call.from, {
         text: `📵 Calls are not allowed on *${config?.botName || "this bot"}*.`,
       });
-    } catch (e) {
-      log.debug(`reject call:`, e.message);
-    }
+    } catch (e) { log.debug(`reject call:`, e.message); }
   }
 }
 
@@ -366,11 +344,8 @@ async function onMessageDelete({ conn, deletes, sessionId, config }) {
   if (!eff(config, "ANTIDELETE")) return;
   for (const cmd of COMMANDS.values()) {
     if (typeof cmd.onDelete !== "function") continue;
-    try {
-      await cmd.onDelete({ conn, deletes, sessionId, config });
-    } catch (e) {
-      log.error(`onDelete ${cmd.name}:`, e.message);
-    }
+    try { await cmd.onDelete({ conn, deletes, sessionId, config }); }
+    catch (e) { log.error(`onDelete ${cmd.name}:`, e.message); }
   }
 }
 
@@ -378,19 +353,12 @@ function listCommands() {
   return Array.from(COMMANDS.values())
     .filter((c) => !c.hidden)
     .map((c) => ({
-      name: c.name,
-      aliases: c.aliases,
-      description: c.description,
-      usage: c.usage,
-      category: c.category,
-      ownerOnly: c.ownerOnly,
+      name: c.name, aliases: c.aliases, description: c.description,
+      usage: c.usage, category: c.category, ownerOnly: c.ownerOnly,
     }));
 }
 
-function init() {
-  loadAllCommands();
-  startWatcher();
-}
+function init() { loadAllCommands(); startWatcher(); }
 init();
 
 module.exports = {
