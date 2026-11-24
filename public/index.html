@@ -4,253 +4,71 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="dark">
-  <title>303-XMD — Web Pairing</title>
+  <title>303-XMD — Multi-User Web Pairing</title>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
   <style>
-    :root {
-      --primary: #00ff88;
-      --bg: #0a0a0c;
-      --card: rgba(25, 25, 30, 0.6);
-      --border: rgba(255, 255, 255, 0.1);
-      --text: #ffffff;
-      --muted: #8b8b93;
-    }
-
-    * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Outfit', sans-serif; }
-
-    body {
-      background-color: var(--bg);
-      color: var(--text);
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background-image:
-        radial-gradient(circle at 15% 50%, rgba(0, 255, 136, 0.08) 0%, transparent 50%),
-        radial-gradient(circle at 85% 30%, rgba(0, 150, 255, 0.08) 0%, transparent 50%);
-      overflow: hidden;
-      padding: 16px;
-    }
-
-    .glass-panel {
-      background: var(--card);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      border: 1px solid var(--border);
-      border-radius: 24px;
-      padding: 40px;
-      width: 100%;
-      max-width: 420px;
-      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-      text-align: center;
-      position: relative;
-      z-index: 10;
-    }
-
-    .logo {
-      font-size: 28px;
-      font-weight: 800;
-      letter-spacing: -1px;
-      margin-bottom: 8px;
-      background: linear-gradient(90deg, #fff, var(--primary));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-
-    .subtitle {
-      color: var(--muted);
-      font-size: 14px;
-      margin-bottom: 32px;
-    }
-
-    .input-group {
-      margin-bottom: 20px;
-      text-align: left;
-    }
-
-    .input-group label {
-      display: block;
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 8px;
-      margin-left: 4px;
-      text-transform: uppercase;
-      letter-spacing: 1px;
-    }
-
-    .input-group input {
-      width: 100%;
-      background: rgba(0, 0, 0, 0.2);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 16px;
-      color: var(--text);
-      font-size: 16px;
-      outline: none;
-      transition: all 0.3s ease;
-    }
-
-    .input-group input:focus {
-      border-color: var(--primary);
-      box-shadow: 0 0 0 3px rgba(0, 255, 136, 0.1);
-    }
-
-    button {
-      width: 100%;
-      padding: 16px;
-      border-radius: 12px;
-      border: none;
-      background: var(--primary);
-      color: #000;
-      font-size: 16px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.3s ease;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-    }
-
-    button:hover:not(:disabled) {
-      transform: translateY(-2px);
-      box-shadow: 0 10px 20px -10px var(--primary);
-    }
-
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-      transform: none;
-      box-shadow: none;
-    }
-
-    #result-area {
-      display: none;
-      margin-top: 24px;
-      padding-top: 24px;
-      border-top: 1px solid var(--border);
-      animation: fadeIn 0.5s ease;
-    }
-
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(10px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    .code-box {
-      background: rgba(0, 255, 136, 0.1);
-      border: 1px dashed var(--primary);
-      border-radius: 12px;
-      padding: 20px;
-      margin-bottom: 16px;
-    }
-
-    .code-box p {
-      color: var(--muted);
-      font-size: 13px;
-      margin-bottom: 8px;
-    }
-
-    .code {
-      font-size: 32px;
-      font-weight: 800;
-      letter-spacing: 4px;
-      color: var(--primary);
-      user-select: all;
-      word-break: break-all;
-    }
-
-    .status-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 16px;
-      border-radius: 20px;
-      font-size: 13px;
-      font-weight: 600;
-      background: rgba(255, 255, 255, 0.05);
-      color: var(--muted);
-    }
-
-    .status-badge.connected {
-      background: rgba(0, 255, 136, 0.15);
-      color: var(--primary);
-    }
-
-    .status-badge.expired {
-      background: rgba(255, 74, 74, 0.15);
-      color: #ff4a4a;
-    }
-
-    .dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--muted);
-      flex-shrink: 0;
-    }
-
-    .status-badge.connected .dot {
-      background: var(--primary);
-      box-shadow: 0 0 10px var(--primary);
-      animation: pulse 2s infinite;
-    }
-
-    @keyframes pulse {
-      0% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0.4); }
-      70% { box-shadow: 0 0 0 10px rgba(0, 255, 136, 0); }
-      100% { box-shadow: 0 0 0 0 rgba(0, 255, 136, 0); }
-    }
-
-    .loader {
-      display: none;
-      width: 20px;
-      height: 20px;
-      border: 3px solid rgba(0,0,0,0.3);
-      border-radius: 50%;
-      border-top-color: #000;
-      animation: spin 1s ease-in-out infinite;
-    }
-
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    .error-msg {
-      color: #ff4a4a;
-      font-size: 14px;
-      margin-top: 12px;
-      display: none;
-    }
-
-    .footer {
-      margin-top: 30px;
-      font-size: 12px;
-      color: var(--muted);
-    }
+    :root{--primary:#00ff88;--bg:#0a0a0c;--card:rgba(25,25,30,.6);--border:rgba(255,255,255,.1);--text:#fff;--muted:#8b8b93}
+    *{margin:0;padding:0;box-sizing:border-box;font-family:'Outfit',sans-serif}
+    body{background:var(--bg);color:var(--text);min-height:100vh;display:flex;align-items:center;justify-content:center;
+         background-image:radial-gradient(circle at 15% 50%,rgba(0,255,136,.08) 0,transparent 50%),
+                          radial-gradient(circle at 85% 30%,rgba(0,150,255,.08) 0,transparent 50%);
+         overflow:hidden;padding:16px}
+    .glass-panel{background:var(--card);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+                 border:1px solid var(--border);border-radius:24px;padding:40px;width:100%;max-width:420px;
+                 box-shadow:0 25px 50px -12px rgba(0,0,0,.5);text-align:center;position:relative;z-index:10}
+    .logo{font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;
+          background:linear-gradient(90deg,#fff,var(--primary));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+    .subtitle{color:var(--muted);font-size:14px;margin-bottom:8px}
+    .notice{color:var(--muted);font-size:12px;margin-bottom:24px;padding:8px 12px;border-radius:8px;
+            background:rgba(0,255,136,.06);border:1px solid rgba(0,255,136,.15)}
+    .input-group{margin-bottom:20px;text-align:left}
+    .input-group label{display:block;font-size:12px;color:var(--muted);margin-bottom:8px;
+                       margin-left:4px;text-transform:uppercase;letter-spacing:1px}
+    .input-group input{width:100%;background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:12px;
+                       padding:16px;color:var(--text);font-size:16px;outline:none;transition:all .3s}
+    .input-group input:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(0,255,136,.1)}
+    button{width:100%;padding:16px;border-radius:12px;border:none;background:var(--primary);color:#000;
+           font-size:16px;font-weight:600;cursor:pointer;transition:all .3s;display:flex;align-items:center;
+           justify-content:center;gap:10px}
+    button:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 10px 20px -10px var(--primary)}
+    button:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+    button.secondary{background:transparent;color:var(--muted);border:1px solid var(--border);margin-top:12px;font-size:14px;padding:12px}
+    #result-area{display:none;margin-top:24px;padding-top:24px;border-top:1px solid var(--border);animation:fadeIn .5s}
+    @keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+    .code-box{background:rgba(0,255,136,.1);border:1px dashed var(--primary);border-radius:12px;padding:20px;margin-bottom:16px}
+    .code-box p{color:var(--muted);font-size:13px;margin-bottom:8px}
+    .code{font-size:32px;font-weight:800;letter-spacing:4px;color:var(--primary);user-select:all;word-break:break-all}
+    .status-badge{display:inline-flex;align-items:center;gap:8px;padding:8px 16px;border-radius:20px;
+                  font-size:13px;font-weight:600;background:rgba(255,255,255,.05);color:var(--muted)}
+    .status-badge.connected{background:rgba(0,255,136,.15);color:var(--primary)}
+    .status-badge.expired{background:rgba(255,74,74,.15);color:#ff4a4a}
+    .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex-shrink:0}
+    .status-badge.connected .dot{background:var(--primary);box-shadow:0 0 10px var(--primary);animation:pulse 2s infinite}
+    @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(0,255,136,.4)}70%{box-shadow:0 0 0 10px rgba(0,255,136,0)}100%{box-shadow:0 0 0 0 rgba(0,255,136,0)}}
+    .loader{display:none;width:20px;height:20px;border:3px solid rgba(0,0,0,.3);border-radius:50%;
+            border-top-color:#000;animation:spin 1s ease-in-out infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .error-msg{color:#ff4a4a;font-size:14px;margin-top:12px;display:none}
+    .footer{margin-top:30px;font-size:12px;color:var(--muted)}
   </style>
 </head>
 <body>
-
   <div class="glass-panel">
     <div class="logo">303-XMD</div>
-    <div class="subtitle">THE LAST KEY — Web Pairing</div>
+    <div class="subtitle">THE LAST KEY — Multi-User Web Pairing</div>
+    <div class="notice">🔒 This session belongs only to the number you pair. Each user gets their own.</div>
 
     <div class="input-group">
       <label for="phone">WhatsApp Number (with country code)</label>
-      <input
-        type="tel"
-        id="phone"
-        placeholder="e.g. 254794376595"
-        autocomplete="off"
-        inputmode="numeric"
-        pattern="[0-9]*"
-        maxlength="15"
-      >
+      <input type="tel" id="phone" placeholder="e.g. 254794376595"
+             autocomplete="off" inputmode="numeric" pattern="[0-9]*" maxlength="15">
     </div>
 
     <button id="pair-btn" type="button">
       <span id="btn-text">Generate Pairing Code</span>
       <div class="loader" id="btn-loader"></div>
     </button>
+    <button id="clear-btn" type="button" class="secondary" style="display:none">Clear this session</button>
 
     <div class="error-msg" id="error-msg" role="alert" aria-live="assertive"></div>
 
@@ -259,60 +77,40 @@
         <p>Enter this code on your WhatsApp:</p>
         <div class="code" id="pairing-code">----</div>
       </div>
-
       <div class="status-badge" id="status-badge">
         <div class="dot"></div>
         <span id="status-text" aria-live="polite">Waiting for connection...</span>
       </div>
     </div>
 
-    <div class="footer">
-      &copy; <span id="year"></span> 303-XMD. Powered by mr presenter.
-    </div>
+    <div class="footer">&copy; <span id="year"></span> 303-XMD. Powered by Baileys.</div>
   </div>
 
   <script>
     'use strict';
+    const LS_KEY = '303xmd.session';
+    const $ = (id) => document.getElementById(id);
 
-    // ── State ──────────────────────────────────────────────
     let pollInterval = null;
     let currentSessionId = null;
     let busy = false;
-    let pollGeneration = 0; // FIX #1/#7: kills stale in-flight polls on new session
+    let pollGeneration = 0;
 
-    const $ = (id) => document.getElementById(id);
-
-    // FIX #5: define helpers BEFORE use (no reliance on hoisting)
-    function showError(msg) {
-      const el = $('error-msg');
-      el.innerText = msg;
-      el.style.display = 'block';
-    }
-    function clearError() {
-      const el = $('error-msg');
-      el.style.display = 'none';
-      el.innerText = '';
-    }
+    function showError(msg) { const e = $('error-msg'); e.innerText = msg; e.style.display = 'block'; }
+    function clearError() { const e = $('error-msg'); e.style.display = 'none'; e.innerText = ''; }
     function setLoading(on) {
-      const btn = $('pair-btn');
-      btn.disabled = on;
+      $('pair-btn').disabled = on;
       $('btn-text').style.display = on ? 'none' : 'block';
       $('btn-loader').style.display = on ? 'block' : 'none';
     }
     function resetStatusBadge() {
-      const badge = $('status-badge');
-      badge.classList.remove('connected', 'expired');
+      const b = $('status-badge'); b.classList.remove('connected', 'expired');
       $('status-text').innerText = 'Waiting for connection...';
     }
     function stopPolling() {
-      if (pollInterval) {
-        clearInterval(pollInterval);
-        pollInterval = null;
-      }
+      if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
       pollGeneration++;
     }
-
-    // FIX #9 + #8: safe JSON parse + abortable fetch with timeout
     async function fetchJson(url, options = {}, timeoutMs = 15000) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -320,172 +118,113 @@
         const res = await fetch(url, { ...options, signal: controller.signal });
         const text = await res.text();
         let data = null;
-        if (text) {
-          try { data = JSON.parse(text); }
-          catch { data = null; }
-        }
-        return { res, data, text };
-      } finally {
-        clearTimeout(timer);
-      }
+        if (text) { try { data = JSON.parse(text); } catch { data = null; } }
+        return { res, data };
+      } finally { clearTimeout(timer); }
     }
 
-    // ── Main action ────────────────────────────────────────
-    async function requestCode() {
-      if (busy) return;   // FIX #3: re-entrancy guard (covers Enter + click)
-      busy = true;
+    function saveSession(s) { try { localStorage.setItem(LS_KEY, JSON.stringify(s)); } catch {} }
+    function loadSession() { try { return JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch { return null; } }
+    function clearSession() { try { localStorage.removeItem(LS_KEY); } catch {} }
 
-      clearError();
-      stopPolling();      // cancel any stale poll from a previous session
-      resetStatusBadge();
+    async function requestCode() {
+      if (busy) return;
+      busy = true; clearError(); stopPolling();
       $('result-area').style.display = 'none';
 
       const phone = $('phone').value.replace(/[^0-9]/g, '');
-
-      // FIX #15: validate length and reject all-zero / leading-zero garbage
-      if (phone.length < 10 || phone.length > 15) {
-        showError('Please enter a valid phone number with country code.');
-        busy = false;
-        return;
-      }
-      if (!/^[1-9]\d{9,14}$/.test(phone)) {
-        showError('Invalid phone number format.');
-        busy = false;
-        return;
-      }
+      if (phone.length < 10 || phone.length > 15) { showError('Enter a valid phone number.'); busy = false; return; }
+      if (!/^[1-9]\d{9,14}$/.test(phone)) { showError('Invalid phone number format.'); busy = false; return; }
 
       setLoading(true);
-
       try {
-        // FIX #8: 45s client timeout (just above the 30s server timeout)
-        const { res, data } = await fetchJson(
-          '/pair',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ phone }),
-          },
-          45000
-        );
+        const { res, data } = await fetchJson('/pair', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phone }),
+        }, 45000);
 
-        // FIX #9: non-JSON error body → friendly message
-        if (!res.ok) {
-          throw new Error(
-            (data && data.error) || `Request failed (${res.status})`
-          );
-        }
-
-        // FIX #4: validate response shape before using it
-        if (!data || typeof data !== 'object') {
-          throw new Error('Invalid server response.');
-        }
-        if (!data.sessionId || typeof data.sessionId !== 'string') {
-          throw new Error('Server did not return a session ID.');
-        }
-        if (!data.code || typeof data.code !== 'string') {
-          throw new Error('Server did not return a pairing code.');
-        }
+        if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
+        if (!data || !data.sessionId || !data.code) throw new Error('Invalid server response.');
 
         currentSessionId = data.sessionId;
         $('pairing-code').innerText = data.code;
         $('result-area').style.display = 'block';
-
+        $('clear-btn').style.display = 'block';
+        saveSession({ sessionId: data.sessionId, code: data.code, phone });
         startPolling(data.sessionId);
       } catch (err) {
-        if (err.name === 'AbortError') {
-          showError('Request timed out. Please try again.');
-        } else {
-          showError(err.message || 'Failed to generate code.');
-        }
-      } finally {
-        setLoading(false);
-        busy = false;
-      }
+        if (err.name === 'AbortError') showError('Request timed out. Try again.');
+        else showError(err.message || 'Failed to generate code.');
+      } finally { setLoading(false); busy = false; }
     }
 
-    // ── Polling ────────────────────────────────────────────
     function startPolling(sessionId) {
       stopPolling();
-      const myGeneration = ++pollGeneration;
-
+      const myGen = ++pollGeneration;
       const badge = $('status-badge');
-      const statusText = $('status-text');
-      let consecutiveErrors = 0;
+      let errors = 0;
 
       pollInterval = setInterval(async () => {
-        // FIX #1/#7: discard results from a superseded poll
-        if (myGeneration !== pollGeneration) return;
-
+        if (myGen !== pollGeneration) return;
         let res, data;
         try {
-          // 10s poll timeout so a hung request doesn't stall the interval
-          ({ res, data } = await fetchJson(
-            `/status/${encodeURIComponent(sessionId)}`,
-            {},
-            10000
-          ));
+          ({ res, data } = await fetchJson(`/status/${encodeURIComponent(sessionId)}`, {}, 10000));
         } catch {
-          // network error / abort
-          if (++consecutiveErrors >= 5) {
-            stopPolling();
-            badge.classList.add('expired');
-            statusText.innerText = 'Lost connection to server.';
-          }
+          if (++errors >= 5) { stopPolling(); badge.classList.add('expired'); $('status-text').innerText = 'Lost connection.'; }
           return;
         }
-
-        // FIX #1/#2: stop on 404 (session gone / reaped / wiped)
         if (res.status === 404) {
-          stopPolling();
-          badge.classList.add('expired');
-          badge.classList.remove('connected');
-          statusText.innerText = 'Session expired — generate a new code.';
+          stopPolling(); badge.classList.add('expired'); badge.classList.remove('connected');
+          $('status-text').innerText = 'Session expired — generate a new code.';
           return;
         }
         if (!res.ok || !data) {
-          if (++consecutiveErrors >= 5) {
-            stopPolling();
-            badge.classList.add('expired');
-            statusText.innerText = 'Lost connection to server.';
-          }
+          if (++errors >= 5) { stopPolling(); badge.classList.add('expired'); $('status-text').innerText = 'Lost connection.'; }
           return;
         }
-        consecutiveErrors = 0;
-
+        errors = 0;
         if (data.connected) {
-          stopPolling();
-          badge.classList.add('connected');
-          badge.classList.remove('expired');
-          // FIX #13: show which number got linked
+          stopPolling(); badge.classList.add('connected'); badge.classList.remove('expired');
           const num = data.jid ? data.jid.split('@')[0].split(':')[0] : null;
-          statusText.innerText = num
-            ? `Connected as ${num} ✅`
-            : 'Connected successfully! ✅';
+          $('status-text').innerText = num ? `Connected as ${num} ✅` : 'Connected successfully! ✅';
         } else if (data.socketReady) {
-          statusText.innerText = 'Socket ready, waiting for WhatsApp...';
+          $('status-text').innerText = 'Socket ready, waiting for WhatsApp...';
         } else {
-          statusText.innerText = 'Waiting for connection...';
+          $('status-text').innerText = 'Waiting for connection...';
         }
       }, 3000);
     }
 
-    // ── Wiring ─────────────────────────────────────────────
-    // FIX #3: button uses addEventListener; Enter key goes through same guard
+    function clearCurrent() {
+      stopPolling(); clearSession();
+      currentSessionId = null;
+      $('result-area').style.display = 'none';
+      $('clear-btn').style.display = 'none';
+      $('phone').value = '';
+      resetStatusBadge();
+      clearError();
+    }
+
+    // Wire
     $('pair-btn').addEventListener('click', requestCode);
-    $('phone').addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        requestCode();
-      }
-    });
-
-    // FIX #1: stop polling when leaving the page
-    window.addEventListener('beforeunload', () => {
-      stopPolling();
-    });
-
-    // FIX #11: auto-fill copyright year
+    $('clear-btn').addEventListener('click', clearCurrent);
+    $('phone').addEventListener('keypress', (e) => { if (e.key === 'Enter') { e.preventDefault(); requestCode(); } });
+    window.addEventListener('beforeunload', () => stopPolling());
     $('year').textContent = new Date().getFullYear();
+
+    // Resume from localStorage
+    (function resume() {
+      const saved = loadSession();
+      if (saved && saved.sessionId && saved.code) {
+        currentSessionId = saved.sessionId;
+        $('phone').value = saved.phone || '';
+        $('pairing-code').innerText = saved.code;
+        $('result-area').style.display = 'block';
+        $('clear-btn').style.display = 'block';
+        startPolling(saved.sessionId);
+      }
+    })();
   </script>
 </body>
 </html>
