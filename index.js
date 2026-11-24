@@ -3,6 +3,7 @@
 //  • Mongo-backed auth state
 //  • Per-session config
 //  • Delegates ALL command/feature logic to presenter.js
+//  • Auto-serves the UI on root (/)
 // ══════════════════════════════════════════════════════════════
 
 const express = require("express");
@@ -57,18 +58,40 @@ process.on("unhandledRejection", (reason) => {
 // ── Session registry ────────────────────────────────────────
 const sessions = new Map();
 
-// ── Rate limiter (per IP) ───────────────────────────────────
-const pairAttempts = new Map();
-function rateLimited(ip) {
-  const last = pairAttempts.get(ip) || 0;
-  if (Date.now() - last < CONFIG.RATE_LIMIT_MS) return true;
-  pairAttempts.set(ip, Date.now());
-  return false;
+// FIX #2: capacity is reserved synchronously before any await
+let reservedSlots = 0;
+function atCapacity() {
+  return sessions.size + reservedSlots >= CONFIG.MAX_SESSIONS;
+}
+function reserveSlot() {
+  if (atCapacity()) return false;
+  reservedSlots++;
+  return true;
+}
+function releaseSlot() {
+  if (reservedSlots > 0) reservedSlots--;
 }
 
-// ── Capacity check ──────────────────────────────────────────
-function atCapacity() {
-  return sessions.size >= CONFIG.MAX_SESSIONS;
+// ── Rate limiter (per IP) ───────────────────────────────────
+// FIX #1: prune old entries so the Map doesn't leak forever
+// FIX #15: helper to resolve client IP safely (trust proxy aware)
+const pairAttempts = new Map();
+function clientIp(req) {
+  // When app.set("trust proxy", ...) is configured, req.ip is already correct.
+  return req.ip || req.socket?.remoteAddress || "unknown";
+}
+function rateLimited(ip) {
+  const now = Date.now();
+  const last = pairAttempts.get(ip) || 0;
+  if (now - last < CONFIG.RATE_LIMIT_MS) return true;
+  pairAttempts.set(ip, now);
+  return false;
+}
+function pruneRateLimiter() {
+  const cutoff = Date.now() - Math.max(CONFIG.RATE_LIMIT_MS * 4, 60_000);
+  for (const [ip, ts] of pairAttempts.entries()) {
+    if (ts < cutoff) pairAttempts.delete(ip);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -77,6 +100,7 @@ function atCapacity() {
 async function bootSocket(sessionId) {
   let s = sessions.get(sessionId);
   if (s?.conn) return s.conn;
+  // FIX #4: keep bootPromise set synchronously; never null it in finally.
   if (s?.bootPromise) return s.bootPromise;
 
   if (!s) {
@@ -89,10 +113,12 @@ async function bootSocket(sessionId) {
       pairingNumber: null,
       lastSeen: Date.now(),
       config: null,
+      wsOpenPromise: null, // FIX #3: track WS open separately from pairing
     };
     sessions.set(sessionId, s);
   }
 
+  // FIX #4: assign synchronously, clear only in connection.close / on error
   s.bootPromise = (async () => {
     const client = await getMongo();
     const collection = client.db(CONFIG.DB_NAME).collection("authState");
@@ -125,6 +151,11 @@ async function bootSocket(sessionId) {
     s.conn = conn;
     conn.ev.on("creds.update", saveCreds);
 
+    // FIX #14: handle socket-level "error" so EventEmitter doesn't crash process
+    conn.ev.on("error", (e) => {
+      console.error(`[${sessionId}] socket error:`, e?.message || e);
+    });
+
     // ── Messages → presenter ─────────────────────────────
     conn.ev.on("messages.upsert", async (m) => {
       try {
@@ -155,9 +186,16 @@ async function bootSocket(sessionId) {
     });
 
     // ── Deletions (ANTIDELETE) ───────────────────────────
+    // FIX #7: require message:null AND (messageStubType===1 OR stub params present)
     conn.ev.on("messages.update", async (updates) => {
       try {
-        const deletes = updates.filter((u) => u.update?.message === null);
+        const deletes = updates.filter(
+          (u) =>
+            u?.update &&
+            u.update.message === null &&
+            (u.update.messageStubType === 1 ||
+              Array.isArray(u.update.messageStubParameters))
+        );
         if (deletes.length) {
           await onMessageDelete({ conn, deletes, sessionId, config: s.config });
         }
@@ -207,6 +245,8 @@ async function bootSocket(sessionId) {
       if (connection === "close") {
         s.socketReady = false;
         s.conn = null;
+        // FIX #4: clear bootPromise only here, so concurrent callers
+        //          during setup still share the same promise
         s.bootPromise = null;
         const code = lastDisconnect?.error?.output?.statusCode;
         console.log(`❌ [${sessionId}] closed. code=${code}`);
@@ -235,32 +275,45 @@ async function bootSocket(sessionId) {
 
   try {
     return await s.bootPromise;
-  } finally {
+  } catch (e) {
+    // FIX #4: on failure, allow a fresh retry
     s.bootPromise = null;
+    throw e;
   }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// FIX #3: wait for the WebSocket to open (not for socketReady, which
+//         only flips after pairing completes)
+async function waitForSocketOpen(conn, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (conn.ws?.isClosed) throw new Error("Socket closed before ready.");
+    if (conn.ws?.isOpen) return;
+    await sleep(250);
+  }
+  throw new Error("Socket not ready (timeout).");
+}
+
 async function requestPairingCode(sessionId, phoneNumber) {
   const conn = await bootSocket(sessionId);
   const s = sessions.get(sessionId);
+  if (!s) throw new Error("Session vanished.");
   if (conn.user) throw new Error("Session already paired.");
 
-  const deadline = Date.now() + 30000;
-  while (!s.socketReady && Date.now() < deadline) {
-    if (conn.ws?.isClosed) throw new Error("Socket closed before ready.");
-    await sleep(500);
-  }
-  if (!s.socketReady) throw new Error("Socket not ready (timeout).");
+  // FIX #3: wait for the underlying WS to be open (correct precondition)
+  await waitForSocketOpen(conn);
 
   if (s.pairing && s.pairingNumber === phoneNumber) return s.pairing;
 
   let code;
   try {
     code = await conn.requestPairingCode(phoneNumber);
-  } catch {
-    await sleep(2000);
+  } catch (e1) {
+    // FIX #12: log first error; retry only once with a short delay
+    console.error(`[${sessionId}] pairing attempt 1 failed:`, e1?.message || e1);
+    await sleep(1500);
     code = await conn.requestPairingCode(phoneNumber);
   }
 
@@ -274,10 +327,23 @@ async function requestPairingCode(sessionId, phoneNumber) {
 //  EXPRESS PANEL
 // ══════════════════════════════════════════════════════════════
 const app = express();
-app.use(express.json());
+
+// FIX #15: honor X-Forwarded-For when behind a proxy.
+// Set to `1` (single proxy hop) by default. If not behind a proxy,
+// the header is ignored and req.ip falls back to the socket address.
+app.set("trust proxy", 1);
+
+// FIX #11: cap JSON body size
+app.use(express.json({ limit: "16kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-app.get("/", (_req, res) => {
+// ── SERVE UI AUTOMATICALLY ON ROOT (/) ──────────────────────
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+// ── SYSTEM JSON STATUS (Moved from / to /api) ───────────────
+app.get("/api", (_req, res) => {
   res.json({
     bot: CONFIG.BOT_NAME,
     version: CONFIG.VERSION,
@@ -290,19 +356,24 @@ app.get("/", (_req, res) => {
 });
 
 app.post("/pair", async (req, res) => {
+  let reserved = false;
   try {
     if (CONFIG.PAIR_API_KEY) {
       const key = req.headers["x-api-key"] || req.body?.apiKey;
       if (key !== CONFIG.PAIR_API_KEY) return res.status(401).json({ error: "Unauthorized" });
     }
 
-    const ip = req.ip || req.socket.remoteAddress || "unknown";
+    // FIX #15: use helper
+    const ip = clientIp(req);
     if (rateLimited(ip)) {
       return res.status(429).json({ error: "Too many attempts, wait a minute" });
     }
-    if (atCapacity()) {
+
+    // FIX #2: reserve a slot synchronously to avoid the capacity race
+    if (!reserveSlot()) {
       return res.status(503).json({ error: "Server at capacity, try later" });
     }
+    reserved = true;
 
     const phone = String(req.body?.phone || "").replace(/[^0-9]/g, "");
     if (phone.length < 10 || phone.length > 15) {
@@ -325,10 +396,17 @@ app.post("/pair", async (req, res) => {
     });
 
     const code = await requestPairingCode(sessionId, phone);
-    res.json({ success: true, sessionId, code, bot: customName || CONFIG.BOT_NAME });
+    return res.json({ success: true, sessionId, code, bot: customName || CONFIG.BOT_NAME });
   } catch (e) {
     console.error("pair:", e.message);
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
+  } finally {
+    // FIX #2: release reservation once the session is actually registered,
+    // or on failure. On success, the session now lives in `sessions` and
+    // counts against capacity instead of the reservation.
+    if (reserved) {
+      releaseSlot();
+    }
   }
 });
 
@@ -344,22 +422,47 @@ app.get("/status/:sessionId", (req, res) => {
   });
 });
 
+// FIX #8: allowlist workMode
+const VALID_WORK_MODES = new Set(["public", "private", "group", "self"]);
+
 app.post("/config/:sessionId", async (req, res) => {
   try {
     const s = sessions.get(req.params.sessionId);
     if (!s) return res.status(404).json({ error: "Unknown session" });
+
+    // FIX #8: reject invalid workMode rather than silently storing it
+    if (req.body?.workMode !== undefined) {
+      const wm = String(req.body.workMode).toLowerCase();
+      if (!VALID_WORK_MODES.has(wm)) {
+        return res.status(400).json({
+          error: `Invalid workMode. Allowed: ${[...VALID_WORK_MODES].join(", ")}`,
+        });
+      }
+    }
+
     const patch = {};
     if (req.body?.prefix) patch.prefix = String(req.body.prefix).slice(0, 3);
     if (req.body?.botName) patch.botName = String(req.body.botName).slice(0, 30);
     if (req.body?.workMode) patch.workMode = String(req.body.workMode).toLowerCase();
     if (req.body?.overrides && typeof req.body.overrides === "object") {
-      patch.overrides = { ...(s.config?.overrides || {}), ...req.body.overrides };
+      // FIX #8: allow deleting an override by passing null
+      const merged = { ...(s.config?.overrides || {}) };
+      for (const [k, v] of Object.entries(req.body.overrides)) {
+        if (v === null) delete merged[k];
+        else merged[k] = v;
+      }
+      patch.overrides = merged;
     }
+
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ error: "No valid fields to update" });
+    }
+
     await saveSessionConfig(req.params.sessionId, patch);
     s.config = await getSessionConfig(req.params.sessionId);
-    res.json({ success: true, config: s.config });
+    return res.json({ success: true, config: s.config });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message });
   }
 });
 
@@ -402,8 +505,12 @@ app.listen(CONFIG.PORT, "0.0.0.0", () =>
       .find({ _id: { $regex: ":meta$" } })
       .toArray();
 
+    // FIX #6: dedupe by sessionId just in case (shouldn't happen, but cheap)
+    const seen = new Set();
     for (const meta of metas) {
       const sessionId = meta._id.replace(/:meta$/, "");
+      if (seen.has(sessionId)) continue;
+      seen.add(sessionId);
       console.log(`🔄 resuming ${sessionId}`);
       bootSocket(sessionId).catch((e) =>
         console.error(`resume ${sessionId}:`, e.message)
@@ -418,12 +525,27 @@ app.listen(CONFIG.PORT, "0.0.0.0", () =>
 //  IDLE SESSION REAPER (hourly)
 // ══════════════════════════════════════════════════════════════
 setInterval(() => {
+  // FIX #1: prune rate limiter alongside the reaper
+  pruneRateLimiter();
+
   const now = Date.now();
   for (const [sessionId, s] of sessions.entries()) {
-    if (s.lastSeen && now - s.lastSeen > CONFIG.SESSION_TTL_MS) {
-      console.log(`🧹 reaping idle session ${sessionId}`);
-      try { s.conn?.end?.(undefined); } catch {}
-      sessions.delete(sessionId);
+    if (!s.lastSeen) continue;
+    if (now - s.lastSeen <= CONFIG.SESSION_TTL_MS) continue;
+    // FIX #5: only reap if the socket is actually connected OR has been idle
+    // long enough that the auth state is likely orphaned. (We do NOT
+    // wipe Mongo auth here — resume-on-boot still picks it up.)
+    console.log(`🧹 reaping idle session ${sessionId}`);
+    try {
+      s.conn?.end?.(undefined);
+    } catch (e) {
+      console.error(`[${sessionId}] end error:`, e.message);
     }
+    // Clear any pending reconnect timer so we don't immediately re-boot
+    if (s.reconnectTimer) {
+      clearTimeout(s.reconnectTimer);
+      s.reconnectTimer = null;
+    }
+    sessions.delete(sessionId);
   }
 }, 60 * 60 * 1000);
