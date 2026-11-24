@@ -1,4 +1,10 @@
-// index.js
+// ══════════════════════════════════════════════════════════════
+//  index.js — 303-XMD pairing + connection + Express
+//  • Mongo-backed auth state
+//  • Per-session config
+//  • Delegates ALL command/feature logic to presenter.js
+// ══════════════════════════════════════════════════════════════
+
 const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
@@ -19,7 +25,13 @@ const {
   saveSessionConfig,
   wipeSession,
 } = require("./db");
-const { handleMessage, onPresenceUpdate } = require("./handler");
+const presenter = require("./presenter");
+const {
+  handleMessage,
+  onPresenceUpdate,
+  onCall,
+  onMessageDelete,
+} = presenter;
 
 const logger = pino({ level: CONFIG.LOG_LEVEL });
 
@@ -37,6 +49,9 @@ process.on("uncaughtException", (err) => {
     process.exit(1);
   }
   console.error("Uncaught Exception:", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Rejection:", reason);
 });
 
 // ── Session registry ────────────────────────────────────────
@@ -56,7 +71,9 @@ function atCapacity() {
   return sessions.size >= CONFIG.MAX_SESSIONS;
 }
 
-// ── Boot a socket for a session ─────────────────────────────
+// ══════════════════════════════════════════════════════════════
+//  BOOT SOCKET
+// ══════════════════════════════════════════════════════════════
 async function bootSocket(sessionId) {
   let s = sessions.get(sessionId);
   if (s?.conn) return s.conn;
@@ -83,7 +100,7 @@ async function bootSocket(sessionId) {
     const { version } = await fetchLatestBaileysVersion();
     const isNewSession = !waState.creds.me;
 
-    // per-session config (loaded fresh every boot)
+    // per-session config
     const sessionConfig = await getSessionConfig(sessionId);
     s.config = sessionConfig;
 
@@ -108,7 +125,7 @@ async function bootSocket(sessionId) {
     s.conn = conn;
     conn.ev.on("creds.update", saveCreds);
 
-    // messages → handler (per-session config passed in)
+    // ── Messages → presenter ─────────────────────────────
     conn.ev.on("messages.upsert", async (m) => {
       try {
         if (m.type !== "notify") return;
@@ -119,6 +136,7 @@ async function bootSocket(sessionId) {
       }
     });
 
+    // ── Presence → presenter ─────────────────────────────
     conn.ev.on("presence.update", async (p) => {
       try {
         await onPresenceUpdate({ conn, presence: p, sessionId, config: s.config });
@@ -127,6 +145,28 @@ async function bootSocket(sessionId) {
       }
     });
 
+    // ── Calls (ANTICALL) ─────────────────────────────────
+    conn.ev.on("call", async (calls) => {
+      try {
+        await onCall({ conn, calls, sessionId, config: s.config });
+      } catch (e) {
+        console.error(`[${sessionId}] call error:`, e.message);
+      }
+    });
+
+    // ── Deletions (ANTIDELETE) ───────────────────────────
+    conn.ev.on("messages.update", async (updates) => {
+      try {
+        const deletes = updates.filter((u) => u.update?.message === null);
+        if (deletes.length) {
+          await onMessageDelete({ conn, deletes, sessionId, config: s.config });
+        }
+      } catch (e) {
+        console.error(`[${sessionId}] delete error:`, e.message);
+      }
+    });
+
+    // ── Connection lifecycle ─────────────────────────────
     conn.ev.on("connection.update", async (update) => {
       const { connection, lastDisconnect } = update;
 
@@ -135,7 +175,10 @@ async function bootSocket(sessionId) {
         s.pairing = null;
         s.pairingNumber = null;
         s.lastSeen = Date.now();
-        console.log(`✅ [${sessionId}] connected as ${conn.user?.id} — ${sessionConfig.botName} v${sessionConfig.version}`);
+        console.log(
+          `✅ [${sessionId}] connected as ${conn.user?.id} — ` +
+          `${sessionConfig.botName} v${sessionConfig.version}`
+        );
 
         try {
           await collection.updateOne(
@@ -173,7 +216,6 @@ async function bootSocket(sessionId) {
           try { await wipeSession(sessionId); } catch {}
           return;
         }
-
         if (code === 440) return;
 
         if (s.reconnectTimer) clearTimeout(s.reconnectTimer);
@@ -228,7 +270,9 @@ async function requestPairingCode(sessionId, phoneNumber) {
   return formatted;
 }
 
-// ── Express panel ───────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+//  EXPRESS PANEL
+// ══════════════════════════════════════════════════════════════
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
@@ -247,19 +291,15 @@ app.get("/", (_req, res) => {
 
 app.post("/pair", async (req, res) => {
   try {
-    // optional API key gate (empty = open, same as before)
     if (CONFIG.PAIR_API_KEY) {
       const key = req.headers["x-api-key"] || req.body?.apiKey;
       if (key !== CONFIG.PAIR_API_KEY) return res.status(401).json({ error: "Unauthorized" });
     }
 
-    // rate limit
     const ip = req.ip || req.socket.remoteAddress || "unknown";
     if (rateLimited(ip)) {
       return res.status(429).json({ error: "Too many attempts, wait a minute" });
     }
-
-    // capacity
     if (atCapacity()) {
       return res.status(503).json({ error: "Server at capacity, try later" });
     }
@@ -272,7 +312,6 @@ app.post("/pair", async (req, res) => {
     const sessionId = crypto.randomBytes(8).toString("hex");
     const customName = String(req.body?.botName || "").slice(0, 30);
 
-    // persist per-session config BEFORE pairing
     await saveSessionConfig(sessionId, {
       botName: customName || CONFIG.BOT_NAME,
       footer: CONFIG.FOOTER,
@@ -305,7 +344,6 @@ app.get("/status/:sessionId", (req, res) => {
   });
 });
 
-// per-session overrides — lets a user turn off AUTO_READ etc. for THEIR bot only
 app.post("/config/:sessionId", async (req, res) => {
   try {
     const s = sessions.get(req.params.sessionId);
@@ -325,15 +363,36 @@ app.post("/config/:sessionId", async (req, res) => {
   }
 });
 
+// ── List loaded commands (from presenter) ───────────────────
+app.get("/commands", (_req, res) => res.json(presenter.listCommands()));
+
+// ── Manual reload (owner convenience) ───────────────────────
+app.post("/reload", (req, res) => {
+  if (CONFIG.PAIR_API_KEY) {
+    const key = req.headers["x-api-key"] || req.body?.apiKey;
+    if (key !== CONFIG.PAIR_API_KEY) return res.status(401).json({ error: "Unauthorized" });
+  }
+  presenter._reload();
+  res.json({ success: true, commands: presenter.listCommands().length });
+});
+
 app.get("/health", (_req, res) =>
-  res.json({ ok: true, bot: CONFIG.BOT_NAME, version: CONFIG.VERSION, sessions: sessions.size })
+  res.json({
+    ok: true,
+    bot: CONFIG.BOT_NAME,
+    version: CONFIG.VERSION,
+    sessions: sessions.size,
+    commands: presenter.listCommands().length,
+  })
 );
 
 app.listen(CONFIG.PORT, "0.0.0.0", () =>
   console.log(`🌐 ${CONFIG.BOT_NAME} v${CONFIG.VERSION} panel → http://localhost:${CONFIG.PORT}`)
 );
 
-// ── Resume existing sessions on boot ────────────────────────
+// ══════════════════════════════════════════════════════════════
+//  RESUME EXISTING SESSIONS ON BOOT
+// ══════════════════════════════════════════════════════════════
 (async () => {
   try {
     const client = await getMongo();
@@ -355,7 +414,9 @@ app.listen(CONFIG.PORT, "0.0.0.0", () =>
   }
 })();
 
-// ── Idle session reaper (hourly) ────────────────────────────
+// ══════════════════════════════════════════════════════════════
+//  IDLE SESSION REAPER (hourly)
+// ══════════════════════════════════════════════════════════════
 setInterval(() => {
   const now = Date.now();
   for (const [sessionId, s] of sessions.entries()) {
