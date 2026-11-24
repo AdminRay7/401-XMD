@@ -3,7 +3,7 @@
 //  • Hot-reloads commands from ./commands/
 //  • Routes messages by name + aliases
 //  • Applies per-session feature toggles
-//  • Emits lifecycle hooks for auto-features
+//  • Emits lifecycle hooks (onMessage, onCall, onDelete, onPresence)
 // ══════════════════════════════════════════════════════════════
 
 const fs = require("fs");
@@ -46,9 +46,6 @@ function loadCommand(filePath) {
     return null;
   }
 
-  // Accept either:
-  //   module.exports = { name, aliases, execute, ... }
-  //   module.exports = async function(...) {}   (name = filename)
   let cmd;
   if (typeof mod === "function") {
     cmd = { name: fileName, aliases: [], execute: mod };
@@ -69,10 +66,8 @@ function loadCommand(filePath) {
       privateOnly: mod.privateOnly === true,
       hidden: mod.hidden === true,
       execute: mod.execute || mod.run,
-      // optional lifecycle hooks
       onLoad: mod.onLoad,
       onUnload: mod.onUnload,
-      // optional auto-feature hooks
       onMessage: mod.onMessage,
       onPresence: mod.onPresence,
       onCall: mod.onCall,
@@ -89,14 +84,14 @@ function loadCommand(filePath) {
 
 function registerCommand(cmd) {
   if (!cmd) return;
-  // remove old aliases for this name (hot-reload safety)
   const old = COMMANDS.get(cmd.name);
-  if (old) {
-    for (const a of old.aliases) ALIASES.delete(a);
-  }
+  if (old) for (const a of old.aliases) ALIASES.delete(a);
   COMMANDS.set(cmd.name, cmd);
   for (const a of cmd.aliases) ALIASES.set(a, cmd.name);
-  log.info(`loaded command: ${cmd.name}${cmd.aliases.length ? ` (aliases: ${cmd.aliases.join(", ")})` : ""}`);
+  log.info(
+    `loaded command: ${cmd.name}` +
+    (cmd.aliases.length ? ` (aliases: ${cmd.aliases.join(", ")})` : "")
+  );
 }
 
 function unregisterCommand(name) {
@@ -137,14 +132,13 @@ function startWatcher() {
       reloadTimer = null;
       const full = path.join(COMMAND_DIR, file);
       if (!fs.existsSync(full)) {
-        // file was deleted
         unregisterCommand(path.basename(file, ".js"));
         return;
       }
       log.info(`🔄 reloading: ${file}`);
       const cmd = loadCommand(full);
       registerCommand(cmd);
-    }, 300); // debounce
+    }, 300);
   };
 
   try {
@@ -159,12 +153,27 @@ function startWatcher() {
 }
 
 // ══════════════════════════════════════════════════════════════
-//  FEATURE HELPERS — per-session toggle resolution
+//  FEATURE HELPERS
 // ══════════════════════════════════════════════════════════════
 function eff(config, key) {
   const ov = config?.overrides?.[key];
   if (ov !== undefined) return ov === true;
   return config?.global?.[key] === true;
+}
+
+// ─── Group metadata cache (avoid spam) ──────────────────────
+const META_CACHE = new Map();
+async function safeGroupMetadata(conn, jid) {
+  const now = Date.now();
+  const cached = META_CACHE.get(jid);
+  if (cached && now - cached.ts < 30_000) return cached.data;
+  try {
+    const data = await conn.groupMetadata(jid);
+    META_CACHE.set(jid, { data, ts: now });
+    return data;
+  } catch {
+    return cached?.data || null;
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -174,7 +183,7 @@ async function handleMessage({ conn, m, sessionId, config }) {
   const msg = m.messages?.[0];
   if (!msg?.message) return;
 
-  // Ignore status broadcasts & protocol messages
+  // ── Status broadcast ────────────────────────────────────
   if (msg.key.remoteJid === "status@broadcast") {
     await handleStatus({ conn, msg, sessionId, config });
     return;
@@ -192,18 +201,21 @@ async function handleMessage({ conn, m, sessionId, config }) {
     try { await conn.readMessages([msg.key]); } catch {}
   }
 
+  // ── AUTO-TYPING (brief, respects toggle) ────────────────
+  if (eff(config, "AUTO_TYPING") && !isFromMe) {
+    try { await conn.sendPresenceUpdate("composing", from); } catch {}
+  }
+
   // ── Run per-command onMessage hooks (auto-features) ─────
-  // e.g. antilink.js, antidelete.js can react to ANY message
   for (const cmd of COMMANDS.values()) {
     if (typeof cmd.onMessage !== "function") continue;
     try {
-      await cmd.onMessage({ conn, msg, from, sender, isGroup, text, sessionId, config });
+      await cmd.onMessage({ conn, msg, from, sender, isGroup, text, sessionId, config, log });
     } catch (e) {
       log.error(`onMessage ${cmd.name}:`, e.message);
     }
   }
 
-  // Nothing more to do for non-text or self messages past this point
   if (!text || isFromMe) return;
 
   // ── AUTO-REACT (non-command only) ───────────────────────
@@ -228,12 +240,9 @@ async function handleMessage({ conn, m, sessionId, config }) {
   const rawName = parts[0].toLowerCase();
   const args = parts.slice(1);
 
-  // resolve alias -> canonical
   const canonical = ALIASES.get(rawName) || rawName;
   const cmd = COMMANDS.get(canonical);
-
   if (!cmd) {
-    // unknown command — silent (matches your "don't break" requirement)
     log.debug(`unknown command: ${rawName}`);
     return;
   }
@@ -260,18 +269,9 @@ async function handleMessage({ conn, m, sessionId, config }) {
 
   // ── Execute ─────────────────────────────────────────────
   const ctx = {
-    conn,
-    msg,
-    m,
-    from,
-    sender,
-    isGroup,
-    text,
-    args,
+    conn, msg, m, from, sender, isGroup, text, args,
     commandName: cmd.name,
-    sessionId,
-    config,
-    // helpers
+    sessionId, config,
     reply: (t, opts = {}) =>
       conn.sendMessage(from, { text: String(t) }, { quoted: msg, ...opts }),
     replyImage: (url, caption = "", opts = {}) =>
@@ -284,12 +284,11 @@ async function handleMessage({ conn, m, sessionId, config }) {
       conn.sendMessage(from, { document: { url }, fileName, mimetype }, { quoted: msg, ...opts }),
     react: (emoji) =>
       conn.sendMessage(from, { react: { text: emoji, key: msg.key } }),
-    typing: () =>
-      conn.sendPresenceUpdate("composing", from).catch(() => {}),
-    stopTyping: () =>
-      conn.sendPresenceUpdate("paused", from).catch(() => {}),
+    typing: () => conn.sendPresenceUpdate("composing", from).catch(() => {}),
+    stopTyping: () => conn.sendPresenceUpdate("paused", from).catch(() => {}),
     isOwner: senderIsOwner || senderIsGlobalOwner,
     isGlobalOwner: senderIsGlobalOwner,
+    groupMetadata: () => safeGroupMetadata(conn, from),
     log,
   };
 
@@ -297,13 +296,15 @@ async function handleMessage({ conn, m, sessionId, config }) {
     await cmd.execute(ctx);
   } catch (e) {
     log.error(`command ${cmd.name} threw:`, e.message);
-    try {
-      await ctx.reply(`⚠️ Command error: ${e.message}`);
-    } catch {}
+    try { await ctx.reply(`⚠️ Command error: ${e.message}`); } catch {}
+  } finally {
+    if (eff(config, "AUTO_TYPING")) {
+      try { await conn.sendPresenceUpdate("paused", from); } catch {}
+    }
   }
 }
 
-// ─── Status broadcast handler (AUTO_STATUS_* toggles) ──────
+// ─── Status handler (AUTO_STATUS_* toggles) ─────────────────
 async function handleStatus({ conn, msg, sessionId, config }) {
   try {
     if (eff(config, "AUTO_STATUS_VIEW")) {
@@ -357,7 +358,6 @@ async function onCall({ conn, calls, sessionId, config }) {
 
 // ─── Message delete handler (ANTIDELETE) ────────────────────
 async function onMessageDelete({ conn, deletes, sessionId, config }) {
-  if (!eff(config, "ANTIDELETE")) return;
   for (const cmd of COMMANDS.values()) {
     if (typeof cmd.onDelete !== "function") continue;
     try {
@@ -365,21 +365,6 @@ async function onMessageDelete({ conn, deletes, sessionId, config }) {
     } catch (e) {
       log.error(`onDelete ${cmd.name}:`, e.message);
     }
-  }
-}
-
-// ─── Group metadata cache-safe fetch ────────────────────────
-const META_CACHE = new Map(); // jid -> { data, ts }
-async function safeGroupMetadata(conn, jid) {
-  const now = Date.now();
-  const cached = META_CACHE.get(jid);
-  if (cached && now - cached.ts < 30_000) return cached.data;
-  try {
-    const data = await conn.groupMetadata(jid);
-    META_CACHE.set(jid, { data, ts: now });
-    return data;
-  } catch {
-    return cached?.data || null;
   }
 }
 
@@ -402,7 +387,6 @@ function init() {
   startWatcher();
 }
 
-// auto-init when required (index.js just needs `require("./presenter")`)
 init();
 
 module.exports = {
@@ -411,7 +395,6 @@ module.exports = {
   onCall,
   onMessageDelete,
   listCommands,
-  // exposed for testing / manual reload
   _reload: loadAllCommands,
   _commands: COMMANDS,
   _aliases: ALIASES,
