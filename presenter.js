@@ -126,39 +126,20 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
         const command = isCmd ? text.slice(currentPrefix.length).trim().split(/\s+/)[0].toLowerCase() : '';
         const args = text ? text.trim().split(/ +/).slice(1) : [];
 
-        // 🖨️ CONSOLE LOGGER
-        if (process.env.LOG_LEVEL !== "silent") {
-            const date = new Date().toLocaleString('en-US', { timeZone: 'Africa/Nairobi' });
-            console.log(`\n┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓`);
-            console.log(`┃ 🟢 ${currentBotName}                   ┃`);
-            console.log(`┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛`);
-            console.log(`» Sent Time: ${date}`);
-            console.log(`» Message Type: ${type}`);
-            console.log(`» Sender Name: ${pushname}`);
-            console.log(`» Chat ID: ${String(sender).split('@')[0]}`);
-            console.log(`» Group: ${isGroup ? "YES" : "NO"}`);
-            console.log(`» Group JID: ${isGroup ? from : "N/A"}`);
-            console.log(`» Message: ${text ? text.slice(0, 50) : "[Media/No Text]"}`);
-            console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`);
-        }
-
         // 🌟 MULTI-USER OWNER DETECTION
         const senderBare     = bareJid(sender);
         const sessionJid     = conn.user?.id || '';
-        const sessionLid     = conn.user?.lid || ''; 
         const sessionBare    = bareJid(sessionJid);
-        const sessionLidBare = bareJid(sessionLid);
         const ownerCfgBare   = bareJid(sessionConfig?.ownerNumber || config.OWNER_NUMBER);
 
         const isOwner =
             msg.key.fromMe === true ||                                     
             (senderBare && ownerCfgBare && senderBare === ownerCfgBare) || 
             (senderBare && sessionBare && senderBare === sessionBare) ||   
-            (senderBare && sessionLidBare && senderBare === sessionLidBare) ||
             isSessionOwner(sender, sessionConfig) ||
             isGlobalOwner(sender);
 
-        // 🌟 WORK MODE GATE (Private = Owner only, Public = Everyone)
+        // 🌟 WORK MODE GATE
         const mode = (sessionConfig?.workMode || config.WORK_MODE || "public").toLowerCase();
         if (mode === 'private' && !isOwner) return;
 
@@ -174,13 +155,21 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
 
         try { loadCommands(false); } catch {}
 
+        // 🌟 FIX: INJECT THE REPLY FUNCTION INTO CONTEXT
+        const replyFunc = (t, opts = {}) => conn.sendMessage(from, { text: String(t) }, { quoted: msg, ...opts });
+        const reactFunc = (emoji) => conn.sendMessage(from, { react: { text: emoji, key: msg.key } });
+        
+        // Fallback for older commands calling conn.reply
+        conn.reply = replyFunc;
+        conn.react = reactFunc;
+
         const cmdCtx = {
             from, sender, isOwner, isGlobalOwner: isGlobalOwner(sender), isGroupAdmin, pushname, config: sessionConfig, conn, msg,
             sessionId, isGroup, body: text, args, command,
             prefix: currentPrefix, botName: currentBotName, isCmd,
             senderBare, sessionBare, ownerCfgBare,
-            reply: (t, opts = {}) => conn.sendMessage(from, { text: String(t) }, { quoted: msg, ...opts }),
-            react: (emoji) => conn.sendMessage(from, { react: { text: emoji, key: msg.key } }),
+            reply: replyFunc,
+            react: reactFunc,
             groupMetadata: () => conn.groupMetadata(from),
             saveConfig: async (patch) => {
                 const db = require("./db");
