@@ -6,7 +6,8 @@ module.exports = {
   category: "owner",
   ownerOnly: true,
   hidden: true,
-  async execute({ reply, args, conn, config }) {
+  async execute(conn, msg, args, ctx) {           // ← 4 args, take ctx
+    const { reply, config } = ctx;
     const code = args.join(" ");
     if (!code) return reply(`Usage: ${config.prefix}eval <code>`);
     try {
