@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════════════
-//  index.js — 303-XMD multi-user pairing + Express
+//  index.js — 303-XMD multi-user pairing + Express (Fully Fixed)
 // ══════════════════════════════════════════════════════════════
 
 "use strict";
@@ -29,8 +29,9 @@ const {
 const presenter = require("./presenter");
 const { handleMessage, onPresenceUpdate, onCall, onMessageDelete } = presenter;
 
-const logger = pino({ level: CONFIG.LOG_LEVEL });
+const logger = pino({ level: CONFIG.LOG_LEVEL || "info" });
 
+// ── Process-level safety ──────────────────────────────────
 process.on("uncaughtException", (err) => {
   if (err.code === "EADDRINUSE") {
     console.error(`\n❌ Port ${CONFIG.PORT} already in use.\n`);
@@ -41,6 +42,17 @@ process.on("uncaughtException", (err) => {
 process.on("unhandledRejection", (reason) => {
   console.error("Unhandled Rejection:", reason);
 });
+
+// ── Config sanity warnings ────────────────────────────────
+if (!CONFIG.PAIR_API_KEY) {
+  console.warn("⚠️  PAIR_API_KEY is not set — /pair endpoint is OPEN to anyone.");
+}
+if (!CONFIG.RATE_LIMIT_MS) {
+  console.warn("⚠️  RATE_LIMIT_MS missing — defaulting to 60_000ms.");
+}
+if (!CONFIG.STATUS_RATE_MS) {
+  console.warn("⚠️  STATUS_RATE_MS missing — defaulting to 30_000ms.");
+}
 
 // ── Sessions ──────────────────────────────────────────────
 const sessions = new Map();
@@ -64,7 +76,7 @@ function limited(bucket, ip, windowMs) {
   return false;
 }
 function pruneLimiters() {
-  const cut = Date.now() - Math.max(CONFIG.RATE_LIMIT_MS * 4, 60_000);
+  const cut = Date.now() - Math.max((CONFIG.RATE_LIMIT_MS || 60_000) * 4, 60_000);
   for (const m of Object.values(limiterMaps)) {
     for (const [ip, ts] of m.entries()) if (ts < cut) m.delete(ip);
   }
@@ -72,7 +84,7 @@ function pruneLimiters() {
 function clientIp(req) { return req.ip || req.socket?.remoteAddress || "unknown"; }
 
 // ══════════════════════════════════════════════════════════════
-//  BOOT SOCKET (per user)
+//  BOOT SOCKET (per user) — fully hardened
 // ══════════════════════════════════════════════════════════════
 async function bootSocket(sessionId) {
   let s = sessions.get(sessionId);
@@ -95,7 +107,8 @@ async function bootSocket(sessionId) {
     const { version } = await fetchLatestBaileysVersion();
     const isNewSession = !waState.creds.me;
 
-    const sessionConfig = await getSessionConfig(sessionId);
+    // ✅ FIX #25: default config if DB returns null
+    const sessionConfig = (await getSessionConfig(sessionId)) || {};
     s.config = sessionConfig;
 
     const conn = makeWASocket({
@@ -120,13 +133,28 @@ async function bootSocket(sessionId) {
     conn.ev.on("creds.update", saveCreds);
     conn.ev.on("error", (e) => console.error(`[${sessionId}] socket error:`, e?.message || e));
 
+    // ✅ FIX #19: detect revokes from messages.upsert (protocolMessage)
     conn.ev.on("messages.upsert", async (m) => {
       try {
         if (m.type !== "notify") return;
         s.lastSeen = Date.now();
+
+        // handle revokes
+        for (const msg of m.messages || []) {
+          const pm = msg?.message?.protocolMessage;
+          if (pm && (pm.type === 0 || pm.type === "REVOKE") && pm.key) {
+            try {
+              await onMessageDelete({ conn, deletes: [msg], sessionId, config: s.config });
+            } catch (e) {
+              console.error(`[${sessionId}] delete (revoke):`, e.message);
+            }
+          }
+        }
+
         await handleMessage({ conn, m, sessionId, config: s.config });
       } catch (e) { console.error(`[${sessionId}] handler:`, e.message); }
     });
+
     conn.ev.on("presence.update", async (p) => {
       try { await onPresenceUpdate({ conn, presence: p, sessionId, config: s.config }); }
       catch (e) { console.error(`[${sessionId}] presence:`, e.message); }
@@ -158,7 +186,6 @@ async function bootSocket(sessionId) {
         s.lastSeen = Date.now();
         console.log(`✅ [${sessionId}] connected as ${conn.user?.id}`);
 
-        // update :meta to reflect real JID and clear pending
         try {
           await collection.updateOne(
             { _id: `${sessionId}:meta` },
@@ -170,14 +197,19 @@ async function bootSocket(sessionId) {
         if (isNewSession) {
           try {
             const num = conn.user?.id.split(":")[0].split("@")[0];
+            const bname = sessionConfig.botName || CONFIG.BOT_NAME;
+            const bver  = sessionConfig.version  || CONFIG.VERSION;
+            const bpre  = sessionConfig.prefix   || CONFIG.PREFIX;
+            const bmode = sessionConfig.workMode || CONFIG.WORK_MODE;
+            const bfoot = sessionConfig.footer   || CONFIG.FOOTER;
             await conn.sendMessage(`${num}@s.whatsapp.net`, {
               text:
-                `👋 *${sessionConfig.botName}* is online!\n\n` +
-                `📦 Version: *v${sessionConfig.version}*\n` +
+                `👋 *${bname}* is online!\n\n` +
+                `📦 Version: *v${bver}*\n` +
                 `🔑 Session: *${sessionId}*\n` +
-                `⚙️ Prefix: *${sessionConfig.prefix}*\n` +
-                `🌐 Mode: *${sessionConfig.workMode}*\n\n` +
-                `_${sessionConfig.footer}_`,
+                `⚙️ Prefix: *${bpre}*\n` +
+                `🌐 Mode: *${bmode}*\n\n` +
+                `_${bfoot}_`,
             });
           } catch {}
         }
@@ -186,7 +218,7 @@ async function bootSocket(sessionId) {
       if (connection === "close") {
         s.socketReady = false;
         s.conn = null;
-        s.bootPromise = null;
+        s.bootPromise = null;      // ✅ FIX #13: clear stale promise
         const code = lastDisconnect?.error?.output?.statusCode;
         console.log(`❌ [${sessionId}] closed. code=${code}`);
 
@@ -212,20 +244,40 @@ async function bootSocket(sessionId) {
     return conn;
   })();
 
-  try { return await s.bootPromise; }
-  catch (e) { s.bootPromise = null; throw e; }
+  // ✅ FIX #12: clear bootPromise on BOTH success and failure
+  try {
+    const conn = await s.bootPromise;
+    s.bootPromise = null;
+    return conn;
+  } catch (e) {
+    s.bootPromise = null;
+    throw e;
+  }
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function waitForSocketOpen(conn, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (conn.ws?.isClosed) throw new Error("Socket closed before ready.");
-    if (conn.ws?.isOpen) return;
-    await sleep(250);
-  }
-  throw new Error("Socket not ready (timeout).");
+// ✅ FIX #5 / #30: don't block on ws.isOpen — resolve when connection update
+//                    reports qr/connecting, or if socket already has user.
+async function waitForSocketOpen(conn, timeoutMs = 60000) {
+  if (conn.user) return;
+  if (conn.ws?.isOpen) return;
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      conn.ev.off("connection.update", onUpdate);
+      reject(new Error("Socket not ready (timeout)."));
+    }, timeoutMs);
+
+    function onUpdate(u) {
+      if (u?.connection === "connecting" || u?.qr || u?.connection === "open") {
+        clearTimeout(timer);
+        conn.ev.off("connection.update", onUpdate);
+        resolve();
+      }
+    }
+    conn.ev.on("connection.update", onUpdate);
+  });
 }
 
 async function requestPairingCode(sessionId, phoneNumber) {
@@ -237,8 +289,9 @@ async function requestPairingCode(sessionId, phoneNumber) {
   if (s.pairing && s.pairingNumber === phoneNumber) return s.pairing;
 
   let code;
-  try { code = await conn.requestPairingCode(phoneNumber); }
-  catch (e1) {
+  try {
+    code = await conn.requestPairingCode(phoneNumber);
+  } catch (e1) {
     console.error(`[${sessionId}] pairing attempt 1 failed:`, e1?.message || e1);
     await sleep(1500);
     code = await conn.requestPairingCode(phoneNumber);
@@ -256,9 +309,21 @@ app.set("trust proxy", 1);
 app.use(express.json({ limit: "16kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
+// ✅ FIX #8 / #2 / #10: shared auth helper
+function requireApiKey(req, res) {
+  if (!CONFIG.PAIR_API_KEY) return true;
+  const key = req.headers["x-api-key"] || req.body?.apiKey || req.query?.apiKey;
+  if (key !== CONFIG.PAIR_API_KEY) {
+    res.status(401).json({ error: "Unauthorized" });
+    return false;
+  }
+  return true;
+}
+
 app.get("/", (_req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
+
 app.get("/api", (_req, res) => {
   res.json({
     bot: CONFIG.BOT_NAME, version: CONFIG.VERSION, footer: CONFIG.FOOTER,
@@ -270,13 +335,13 @@ app.get("/api", (_req, res) => {
 // ── /pair ────────────────────────────────────────────────
 app.post("/pair", async (req, res) => {
   let reserved = false;
+  let sessionId = null;
   try {
-    if (CONFIG.PAIR_API_KEY) {
-      const key = req.headers["x-api-key"] || req.body?.apiKey;
-      if (key !== CONFIG.PAIR_API_KEY) return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (!requireApiKey(req, res)) return;
+
     const ip = clientIp(req);
-    if (limited("pair", ip, CONFIG.RATE_LIMIT_MS)) {
+    const rateMs = CONFIG.RATE_LIMIT_MS || 60_000;
+    if (limited("pair", ip, rateMs)) {
       return res.status(429).json({ error: "Too many attempts, wait a minute" });
     }
     if (!reserveSlot()) {
@@ -289,9 +354,8 @@ app.post("/pair", async (req, res) => {
       return res.status(400).json({ error: "Invalid phone number" });
     }
     const customName = String(req.body?.botName || "").slice(0, 30);
-    const sessionId = crypto.randomBytes(8).toString("hex");
+    sessionId = crypto.randomBytes(16).toString("hex"); // ✅ FIX #31: 128-bit
 
-    // per-session config: start from DEFAULT_GLOBAL, owner = the pairing phone
     await saveSessionConfig(sessionId, {
       botName: customName || CONFIG.BOT_NAME,
       footer: CONFIG.FOOTER,
@@ -301,10 +365,9 @@ app.post("/pair", async (req, res) => {
       ownerName: CONFIG.OWNER_NAME,
       workMode: CONFIG.WORK_MODE,
       overrides: {},
-      global: { ...DEFAULT_GLOBAL }, // per-user defaults
+      global: { ...DEFAULT_GLOBAL },
     });
 
-    // :meta placeholder so orphan configs can be reaped
     const client = await getMongo();
     await client.db(CONFIG.DB_NAME).collection("authState").updateOne(
       { _id: `${sessionId}:meta` },
@@ -312,10 +375,24 @@ app.post("/pair", async (req, res) => {
       { upsert: true }
     );
 
-    const code = await requestPairingCode(sessionId, phone);
+    // ✅ FIX #3: wipe session/config if pairing fails
+    let code;
+    try {
+      code = await requestPairingCode(sessionId, phone);
+    } catch (pairErr) {
+      console.error(`pair ${sessionId}:`, pairErr.message);
+      try { await wipeSession(sessionId); } catch {}
+      sessions.delete(sessionId);
+      return res.status(500).json({ error: pairErr.message || "Pairing failed" });
+    }
+
     return res.json({ success: true, sessionId, code, bot: customName || CONFIG.BOT_NAME });
   } catch (e) {
     console.error("pair:", e.message);
+    if (sessionId) {
+      try { await wipeSession(sessionId); } catch {}
+      sessions.delete(sessionId);
+    }
     return res.status(500).json({ error: e.message });
   } finally {
     if (reserved) releaseSlot();
@@ -323,9 +400,12 @@ app.post("/pair", async (req, res) => {
 });
 
 // ── /status/:sessionId ───────────────────────────────────
+// ✅ FIX #8: require API key if configured
 app.get("/status/:sessionId", (req, res) => {
+  if (!requireApiKey(req, res)) return;
+
   const ip = clientIp(req);
-  if (limited("status", ip, CONFIG.STATUS_RATE_MS)) {
+  if (limited("status", ip, CONFIG.STATUS_RATE_MS || 30_000)) {
     return res.status(429).json({ error: "Slow down" });
   }
   const s = sessions.get(req.params.sessionId);
@@ -340,16 +420,12 @@ app.get("/status/:sessionId", (req, res) => {
 });
 
 // ── /config/:sessionId ───────────────────────────────────
-// The sessionId acts as the capability token. Require it, require the
-// optional API key, and rate-limit per IP. Never allow cross-session writes.
 app.post("/config/:sessionId", async (req, res) => {
   try {
-    if (CONFIG.PAIR_API_KEY) {
-      const key = req.headers["x-api-key"] || req.body?.apiKey;
-      if (key !== CONFIG.PAIR_API_KEY) return res.status(401).json({ error: "Unauthorized" });
-    }
+    if (!requireApiKey(req, res)) return;
+
     const ip = clientIp(req);
-    if (limited("config", ip, CONFIG.RATE_LIMIT_MS)) {
+    if (limited("config", ip, CONFIG.RATE_LIMIT_MS || 60_000)) {
       return res.status(429).json({ error: "Slow down" });
     }
 
@@ -358,14 +434,17 @@ app.post("/config/:sessionId", async (req, res) => {
 
     if (req.body?.workMode !== undefined) {
       const wm = String(req.body.workMode).toLowerCase();
-      if (!CONFIG.WORK_MODES.has(wm)) {
-        return res.status(400).json({ error: `Invalid workMode. Allowed: ${[...CONFIG.WORK_MODES].join(", ")}` });
+      if (!CONFIG.WORK_MODES?.has?.(wm)) {
+        return res.status(400).json({
+          error: `Invalid workMode. Allowed: ${CONFIG.WORK_MODES ? [...CONFIG.WORK_MODES].join(", ") : "n/a"}`,
+        });
       }
     }
     const patch = {};
     if (req.body?.prefix) patch.prefix = String(req.body.prefix).slice(0, 3);
     if (req.body?.botName) patch.botName = String(req.body.botName).slice(0, 30);
     if (req.body?.workMode) patch.workMode = String(req.body.workMode).toLowerCase();
+
     if (req.body?.overrides && typeof req.body.overrides === "object") {
       const merged = { ...(s.config?.overrides || {}) };
       for (const [k, v] of Object.entries(req.body.overrides)) {
@@ -374,18 +453,18 @@ app.post("/config/:sessionId", async (req, res) => {
       }
       patch.overrides = merged;
     }
+
+    // ✅ FIX #9: merge global, don't replace
     if (req.body?.global && typeof req.body.global === "object") {
-      // only allow toggling known feature keys + ALLOW_GLOBAL_OWNER
-      const allowed = new Set([
-        ...Object.keys(DEFAULT_GLOBAL),
-      ]);
-      const g = {};
+      const allowed = new Set(Object.keys(DEFAULT_GLOBAL || {}));
+      const current = await getSessionConfig(req.params.sessionId);
+      const merged = { ...(current?.global || DEFAULT_GLOBAL || {}) };
       for (const [k, v] of Object.entries(req.body.global)) {
         if (!allowed.has(k)) continue;
-        if (k === "STATUS_REPLY_TEXT" || k === "CHANNEL_EMOJIS") g[k] = v;
-        else g[k] = v === true;
+        if (k === "STATUS_REPLY_TEXT" || k === "CHANNEL_EMOJIS") merged[k] = v;
+        else merged[k] = v === true;
       }
-      patch.global = g;
+      patch.global = merged;
     }
 
     if (Object.keys(patch).length === 0) {
@@ -393,22 +472,37 @@ app.post("/config/:sessionId", async (req, res) => {
     }
 
     await saveSessionConfig(req.params.sessionId, patch);
-    s.config = await getSessionConfig(req.params.sessionId);
+    s.config = (await getSessionConfig(req.params.sessionId)) || {};
     return res.json({ success: true, config: s.config });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
 });
 
-app.get("/commands", (_req, res) => res.json(presenter.listCommands()));
-app.post("/reload", (req, res) => {
+// ✅ FIX #10: /commands hides sensitive commands if no API key
+app.get("/commands", (req, res) => {
+  const all = presenter.listCommands();
   if (CONFIG.PAIR_API_KEY) {
-    const key = req.headers["x-api-key"] || req.body?.apiKey;
-    if (key !== CONFIG.PAIR_API_KEY) return res.status(401).json({ error: "Unauthorized" });
+    const key = req.headers["x-api-key"] || req.query?.apiKey;
+    if (key !== CONFIG.PAIR_API_KEY) {
+      // public view: strip hidden + owner-only
+      return res.json(all.filter((c) => !c.hidden && !c.ownerOnly));
+    }
   }
-  presenter._reload();
-  res.json({ success: true, commands: presenter.listCommands().length });
+  res.json(all);
 });
+
+// ✅ FIX #4: await the reload
+app.post("/reload", async (req, res) => {
+  if (!requireApiKey(req, res)) return;
+  try {
+    await presenter._reload();
+    res.json({ success: true, commands: presenter.listCommands().length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get("/health", (_req, res) =>
   res.json({
     ok: true, bot: CONFIG.BOT_NAME, version: CONFIG.VERSION,
@@ -416,9 +510,16 @@ app.get("/health", (_req, res) =>
   })
 );
 
-app.listen(CONFIG.PORT, "0.0.0.0", () =>
+const server = app.listen(CONFIG.PORT, "0.0.0.0", () =>
   console.log(`🌐 ${CONFIG.BOT_NAME} v${CONFIG.VERSION} panel → http://localhost:${CONFIG.PORT}`)
 );
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`❌ Port ${CONFIG.PORT} already in use.`);
+    process.exit(1);
+  }
+  console.error("Server error:", err);
+});
 
 // ══════════════════════════════════════════════════════════════
 //  RESUME ON BOOT (multi-user safe)
@@ -437,6 +538,7 @@ app.listen(CONFIG.PORT, "0.0.0.0", () =>
     for (const meta of metas) {
       const sessionId = meta._id.replace(/:meta$/, "");
       if (sessions.has(sessionId)) continue;
+      if (sessions.size >= CONFIG.MAX_SESSIONS) break; // ✅ FIX #14
       console.log(`🔄 resuming ${sessionId}`);
       bootSocket(sessionId).catch((e) =>
         console.error(`resume ${sessionId}:`, e.message)
@@ -469,7 +571,9 @@ setInterval(async () => {
     const stale = await listStaleSessions([...sessions.keys()]);
     for (const sid of stale) {
       if (sessions.has(sid)) continue;
-      await wipeSession(sid);
+      try { await wipeSession(sid); } catch (e) {
+        console.error(`wipe ${sid}:`, e.message);
+      }
     }
   } catch (e) {
     console.error("reaper stale:", e.message);
