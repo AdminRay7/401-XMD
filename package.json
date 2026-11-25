@@ -1,31 +1,65 @@
 {
   "name": "303-xmd",
   "version": "2.0.0",
-  "description": "303-XMD — The Last Key",
+  "description": "303-XMD — The Last Key (Bot Server)",
   "private": true,
   "type": "commonjs",
-  "main": "index.js",
+  "main": "bot-server.js",
   "license": "MIT",
+  "author": "303-XMD",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourname/303-xmd-bot.git"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
-    "start": "node --max-old-space-size=1024 --expose-gc index.js"
+    "start": "node --max-old-space-size=1024 --expose-gc --enable-source-maps bot-server.js",
+    "dev": "node --watch --max-old-space-size=1024 --expose-gc bot-server.js",
+    "health": "node -e \"require('http').get('http://127.0.0.1:'+(process.env.BOT_PORT||4000)+'/internal/health',{headers:{'x-internal-key':process.env.INTERNAL_API_KEY||''}},r=>{let d='';r.on('data',c=>d+=c);r.on('end',()=>console.log(d))}).on('error',e=>console.error(e.message))\"",
+    "reset": "node -e \"require('fs-extra').removeSync('./auth_info');console.log('auth_info cleared')\""
   },
   "dependencies": {
     "@whiskeysockets/baileys": "6.7.19",
     "axios": "^1.6.0",
-    "bcryptjs": "^2.4.3",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "ffmpeg-static": "^5.2.0",
     "fs-extra": "^11.0.0",
-    "jsonwebtoken": "^9.0.2",
     "mongodb": "^6.10.0",
-    "mongoose": "^8.0.0",
     "pino": "^9.5.0",
     "sharp": "^0.32.6",
-    "ffmpeg-static": "^5.2.0",
     "yt-search": "^2.10.4",
     "ytdl-core": "^4.11.5"
   },
-  "engines": {
-    "node": ">=20.0.0"
-  }
+  "devDependencies": {
+    "pino-pretty": "^11.0.0"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "bot",
+    "multi-user",
+    "303-xmd"
+  ],
+  "files": [
+    "bot-server.js",
+    "runtime.js",
+    "presenter.js",
+    "config.js",
+    "db.js",
+    "utils.js",
+    "commands/",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "linux",
+    "darwin"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
 }
