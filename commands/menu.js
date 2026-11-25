@@ -6,7 +6,9 @@ module.exports = {
   description: "List all available commands",
   usage: ".menu",
   category: "general",
-  async execute({ reply, config }) {
+  
+  // 🌟 FIX: Accept (conn, msg, args, ctx) properly
+  async execute(conn, msg, args, ctx) {
     // pull registry from presenter without circular require
     const presenter = require(path.join(__dirname, "..", "presenter"));
     const all = presenter.listCommands();
@@ -16,6 +18,9 @@ module.exports = {
       (grouped[c.category] ||= []).push(c);
     }
 
+    // 🌟 FIX: Use ctx.config instead of config
+    const config = ctx.config;
+    
     let out = `╭─「 *${config.botName}* 」\n`;
     out += `│ 🔑 Prefix : ${config.prefix}\n`;
     out += `│ 📦 Version: v${config.version}\n`;
@@ -31,6 +36,6 @@ module.exports = {
     }
 
     out += `_${config.footer}_`;
-    await reply(out);
+    await ctx.reply(out);
   },
 };
