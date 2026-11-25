@@ -1,5 +1,5 @@
 // ============================================================
-//   303-XMD — presenter.js (Fully Fixed)
+//   303-XMD — presenter.js (Fixed & Hardened)
 // ============================================================
 const fs = require('fs-extra');
 const path = require('path');
@@ -71,7 +71,11 @@ function loadCommands(force = false) {
                     }
 
                     if (hasHook) {
-                        newAutoCache.set(mod.name || itemPath, mod);
+                        const autoKey = mod.name || itemPath;
+                        if (newAutoCache.has(autoKey)) {
+                            console.warn(`⚠️ autoCache collision on "${autoKey}" (${itemPath}) — overwriting.`);
+                        }
+                        newAutoCache.set(autoKey, mod);
                     }
                 } catch (e) {
                     console.error(`⚠️ Load ${itemPath}:`, e.message);
@@ -102,45 +106,57 @@ function bareJid(s) {
 
 // ================= MAIN HANDLER =================
 async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
+    let from = null;
+    let composedTyping = false;
+
     try {
-        if (!m.messages || !m.messages[0]) return;
+        if (!conn || !m || !m.messages || !m.messages[0]) return;
         const msg = m.messages[0];
         if (!msg.message) return;
 
-        const from = msg.key.remoteJid;
-        if (from === 'status@broadcast') return; 
-        
+        from = msg.key.remoteJid;
+        if (!from) return;
+        if (from === 'status@broadcast') return;
+
         const type = Object.keys(msg.message)[0];
-        if (type === 'senderKeyDistributionMessage' || (type === 'protocolMessage' && !msg.message.protocolMessage.type)) return;
+        if (type === 'senderKeyDistributionMessage' ||
+            (type === 'protocolMessage' && !msg.message.protocolMessage.type)) return;
+
+        // Session config safety — never undefined
+        sessionConfig = sessionConfig || {};
 
         const sender = msg.key.participant || msg.key.remoteJid;
+        if (!sender) return;
         const pushname = msg.pushName || "Unknown";
-        const text = getText(msg);
+        const text = String(getText(msg) ?? '');
         const isGroup = from.endsWith('@g.us');
         const isFromMe = !!msg.key.fromMe;
 
-        const currentPrefix = sessionConfig?.prefix || config.PREFIX || ".";
-        const currentBotName = sessionConfig?.botName || config.BOT_NAME || "Bot";
+        const currentPrefix = sessionConfig.prefix || config.PREFIX || ".";
+        const currentBotName = sessionConfig.botName || config.BOT_NAME || "Bot";
 
         const isCmd = text && currentPrefix.length > 0 && text.startsWith(currentPrefix);
-        const command = isCmd ? text.slice(currentPrefix.length).trim().split(/\s+/)[0].toLowerCase() : '';
-        const args = text ? text.trim().split(/ +/).slice(1) : [];
+        // Parse after prefix — args stay consistent for spaced prefixes
+        const afterPrefix = isCmd ? text.slice(currentPrefix.length).trim() : '';
+        const parts = afterPrefix ? afterPrefix.split(/\s+/) : [];
+        const command = (parts[0] || '').toLowerCase();
+        const args = parts.slice(1);
 
         // 🌟 MULTI-USER OWNER DETECTION
         const senderBare     = bareJid(sender);
         const sessionJid     = conn.user?.id || '';
         const sessionBare    = bareJid(sessionJid);
-        const ownerCfgBare   = bareJid(sessionConfig?.ownerNumber || config.OWNER_NUMBER);
+        const ownerCfgBare   = bareJid(sessionConfig.ownerNumber || config.OWNER_NUMBER);
 
         const isOwner =
-            msg.key.fromMe === true ||                                     
-            (senderBare && ownerCfgBare && senderBare === ownerCfgBare) || 
-            (senderBare && sessionBare && senderBare === sessionBare) ||   
+            msg.key.fromMe === true ||
+            (senderBare && ownerCfgBare && senderBare === ownerCfgBare) ||
+            (senderBare && sessionBare && senderBare === sessionBare) ||
             isSessionOwner(sender, sessionConfig) ||
             isGlobalOwner(sender);
 
         // 🌟 WORK MODE GATE
-        const mode = (sessionConfig?.workMode || config.WORK_MODE || "public").toLowerCase();
+        const mode = (sessionConfig.workMode || config.WORK_MODE || "public").toLowerCase();
         if (mode === 'private' && !isOwner) return;
 
         // 🛡️ GROUP ADMIN DETECTION
@@ -155,38 +171,40 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
 
         try { loadCommands(false); } catch {}
 
-        // 🌟 FIX: INJECT PROPERTIES DIRECTLY INTO CONN & MSG
-        // Many older plugins read conn.botName, conn.prefix, or msg.body directly.
-        conn.botName = currentBotName;
-        conn.prefix = currentPrefix;
-        conn.config = sessionConfig;
-        conn.reply = (t, opts = {}) => conn.sendMessage(from, { text: String(t) }, { quoted: msg, ...opts });
-        
+        // 🌟 Build per-message reply closure (no conn mutation → no race)
+        const reply = (t, opts = {}) =>
+            conn.sendMessage(from, { text: String(t) }, { quoted: msg, ...opts });
+
+        // Attach convenience fields to msg only (per-invocation object)
         msg.body = text;
         msg.text = text;
         msg.sender = sender;
 
         const cmdCtx = {
-            from, sender, isOwner, isGlobalOwner: isGlobalOwner(sender), isGroupAdmin, pushname, config: sessionConfig, conn, msg,
-            sessionId, isGroup, body: text, text: text, args, command,
+            from, sender, isOwner, isGlobalOwner: isGlobalOwner(sender), isGroupAdmin, pushname,
+            config: sessionConfig, conn, msg,
+            sessionId, isGroup, body: text, text, args, command,
             prefix: currentPrefix, botName: currentBotName, isCmd,
             senderBare, sessionBare, ownerCfgBare,
-            reply: conn.reply,
+            reply,
             react: (emoji) => conn.sendMessage(from, { react: { text: emoji, key: msg.key } }),
             groupMetadata: () => conn.groupMetadata(from),
             saveConfig: async (patch) => {
                 const db = require("./db");
                 await db.saveSessionConfig(sessionId, patch);
                 const newConf = await db.getSessionConfig(sessionId);
-                Object.assign(sessionConfig, newConf);
+                Object.assign(sessionConfig, newConf || {});
                 return newConf;
             }
         };
 
         // TYPING INDICATOR
-        const autoTyping = sessionConfig?.global?.AUTO_TYPING ?? config.AUTO_TYPING;
+        const autoTyping = sessionConfig.AUTO_TYPING ?? config.AUTO_TYPING;
         if (isCmd && autoTyping && !isFromMe) {
-            try { await conn.sendPresenceUpdate('composing', from); } catch {}
+            try {
+                await conn.sendPresenceUpdate('composing', from);
+                composedTyping = true;
+            } catch {}
         }
 
         // AUTO ENFORCEMENT LAYER
@@ -203,28 +221,33 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
             }
         }
 
-        if (!isCmd && /^[0-9]$/.test((text || '').trim())) {
+        // Skip single-digit replies (poll/vote flows)
+        if (!isCmd && /^[0-9]$/.test(text.trim())) {
             return;
         }
 
         // EXECUTE COMMAND
         if (isCmd) {
             const handler = commandCache.get(command);
-            if (handler && (typeof handler.execute === 'function' || typeof handler.run === 'function')) {
+            if (handler) {
                 const execFn = handler.execute || handler.run;
-                try {
-                    await execFn(conn, msg, args, cmdCtx);
-                } catch (e) {
-                    console.error(`Cmd "${command}":`, e.message);
-                    try { await cmdCtx.reply(`❌ Error: ${e.message}`); } catch (_) {}
+                if (typeof execFn === 'function') {
+                    try {
+                        await execFn(conn, msg, args, cmdCtx);
+                    } catch (e) {
+                        console.error(`Cmd "${command}":`, e.message);
+                        try { await reply(`❌ Error: ${e.message}`); } catch (_) {}
+                    }
                 }
             }
         }
 
     } catch (err) {
-        console.error("Handler Error:", err.message);
+        console.error("Handler Error:", err?.message || err);
     } finally {
-        try { await conn.sendPresenceUpdate('paused', from); } catch {}
+        if (conn && from && composedTyping) {
+            try { await conn.sendPresenceUpdate('paused', from); } catch {}
+        }
     }
 }
 
@@ -264,6 +287,11 @@ module.exports = {
     getCommandCache: () => commandCache,
     getAutoCache: () => autoCache,
     reloadCommands: async () => loadCommands(true),
-    listCommands: () => Array.from(new Set(commandCache.values())).map(c => ({ name: c.name, aliases: c.aliases })),
+    listCommands: () => Array.from(new Set(commandCache.values())).map(c => ({
+        name: c.name || "unknown",
+        aliases: Array.isArray(c.aliases) ? c.aliases : [],
+        category: c.category || "general",
+        description: c.description || ""
+    })),
     _reload: async () => loadCommands(true)
 };
