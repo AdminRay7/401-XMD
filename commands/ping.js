@@ -4,10 +4,18 @@ module.exports = {
   description: "Check bot latency",
   usage: ".ping",
   category: "general",
-  async execute({ reply }) {
+  async execute({ conn, from, msg, reply }) {
     const start = Date.now();
-    const sent = await reply("🏓 Pinging…");
+    const sent = await conn.sendMessage(from, { text: "🏓 Pinging…" }, { quoted: msg });
     const latency = Date.now() - start;
-    await reply(`🏓 Pong! *${latency}ms*`);
+    try {
+      await conn.sendMessage(from, {
+        text: `🏓 Pong! *${latency}ms*`,
+        edit: sent.key,
+      });
+    } catch {
+      // fallback if edit fails (older WA / unsupported)
+      await reply(`🏓 Pong! *${latency}ms*`);
+    }
   },
 };
