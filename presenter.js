@@ -1,5 +1,5 @@
 // ============================================================
-//   303-XMD — presenter.js (Fixed & Hardened)
+//   303-XMD — presenter.js (Fully Updated)
 // ============================================================
 const fs = require('fs-extra');
 const path = require('path');
@@ -114,7 +114,7 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
         const msg = m.messages[0];
         if (!msg.message) return;
 
-        from = msg.key.remoteJid;
+        from = msg.key?.remoteJid;
         if (!from) return;
         if (from === 'status@broadcast') return;
 
@@ -171,7 +171,7 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
 
         try { loadCommands(false); } catch {}
 
-        // 🌟 Build per-message reply closure (no conn mutation → no race)
+        // 🌟 Per-message reply closure (no conn mutation → no race)
         const reply = (t, opts = {}) =>
             conn.sendMessage(from, { text: String(t) }, { quoted: msg, ...opts });
 
@@ -180,12 +180,26 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
         msg.text = text;
         msg.sender = sender;
 
+        // 🌟 SINGLE cmdCtx OBJECT — commands destructure from this
         const cmdCtx = {
-            from, sender, isOwner, isGlobalOwner: isGlobalOwner(sender), isGroupAdmin, pushname,
-            config: sessionConfig, conn, msg,
-            sessionId, isGroup, body: text, text, args, command,
-            prefix: currentPrefix, botName: currentBotName, isCmd,
-            senderBare, sessionBare, ownerCfgBare,
+            // Identity
+            from, sender, senderBare, sessionBare, ownerCfgBare,
+            pushname, sessionId, isGroup, isFromMe,
+
+            // Permissions
+            isOwner, isGlobalOwner: isGlobalOwner(sender), isGroupAdmin,
+
+            // Content
+            body: text, text, args, command, isCmd,
+            prefix: currentPrefix, botName: currentBotName,
+
+            // Session
+            config: sessionConfig,
+
+            // Connections
+            conn, msg,
+
+            // Helpers
             reply,
             react: (emoji) => conn.sendMessage(from, { react: { text: emoji, key: msg.key } }),
             groupMetadata: () => conn.groupMetadata(from),
@@ -230,10 +244,25 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
         if (isCmd) {
             const handler = commandCache.get(command);
             if (handler) {
+                // 🔒 ENFORCE METADATA FLAGS
+                if (handler.ownerOnly && !isOwner) {
+                    return reply("🔒 This command is owner-only.");
+                }
+                if (handler.adminOnly && !isGroupAdmin) {
+                    return reply("🛡️ This command is for group admins only.");
+                }
+                if (handler.groupOnly && !isGroup) {
+                    return reply("👥 This command only works in groups.");
+                }
+                if (handler.privateOnly && isGroup) {
+                    return reply("💬 This command only works in private chat.");
+                }
+
                 const execFn = handler.execute || handler.run;
                 if (typeof execFn === 'function') {
                     try {
-                        await execFn(conn, msg, args, cmdCtx);
+                        // 🌟 SINGLE-ARG CALL: execFn(cmdCtx)
+                        await execFn(cmdCtx);
                     } catch (e) {
                         console.error(`Cmd "${command}":`, e.message);
                         try { await reply(`❌ Error: ${e.message}`); } catch (_) {}
@@ -291,7 +320,13 @@ module.exports = {
         name: c.name || "unknown",
         aliases: Array.isArray(c.aliases) ? c.aliases : [],
         category: c.category || "general",
-        description: c.description || ""
+        description: c.description || "",
+        ownerOnly: !!c.ownerOnly,
+        adminOnly: !!c.adminOnly,
+        groupOnly: !!c.groupOnly,
+        privateOnly: !!c.privateOnly,
+        hidden: !!c.hidden,
+        usage: c.usage || ""
     })),
     _reload: async () => loadCommands(true)
 };
