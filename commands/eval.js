@@ -6,14 +6,16 @@ module.exports = {
   category: "owner",
   ownerOnly: true,
   hidden: true,
-  async execute(conn, msg, args, ctx) {           // ← 4 args, take ctx
-    const { reply, config } = ctx;
+  async execute({ reply, args, config }) {
     const code = args.join(" ");
-    if (!code) return reply(`Usage: ${config.prefix}eval <code>`);
+    if (!code) return reply(`Usage: ${config.prefix || "."}eval <code>`);
     try {
       let result = await eval(`(async () => { ${code} })()`);
-      result = typeof result === "string" ? result : JSON.stringify(result, null, 2);
-      await reply("```" + String(result).slice(0, 4000) + "```");
+      if (typeof result !== "string") {
+        try { result = JSON.stringify(result, null, 2); }
+        catch { result = String(result); }
+      }
+      await reply("```" + String(result ?? "undefined").slice(0, 4000) + "```");
     } catch (e) {
       await reply(`❌ ${e.message}`);
     }
