@@ -1,5 +1,5 @@
 // ============================================================
-//   303-XMD — presenter.js (Perfect Multi-User Fix)
+//   303-XMD — presenter.js (Fully Fixed)
 // ============================================================
 const fs = require('fs-extra');
 const path = require('path');
