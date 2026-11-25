@@ -1,113 +1,182 @@
-// Bot repo — internal HTTP API, binds to loopback only
+// ══════════════════════════════════════════════════════════════
+//  bot-server.js — internal-only API for the web panel
+//  Binds to 127.0.0.1 ONLY. Never expose publicly.
+// ══════════════════════════════════════════════════════════════
+
+"use strict";
+
 const express = require("express");
 const crypto = require("crypto");
 const CONFIG = require("./config");
-const {
-  getSessionConfig, saveSessionConfig, wipeSession,
-  getMongo, DEFAULT_GLOBAL,
-} = require("./db");
-const presenter = require("./presenter");
+const runtime = require("./runtime");
 
-// ── import the boot/pair/status logic from index.js (refactored) ──
-const {
-  bootSocket, sessions, requestPairingCode,
-  reserveSlot, releaseSlot,
-} = require("./runtime");
+const logger = require("pino")({ level: CONFIG.LOG_LEVEL || "info" });
 
-const app = express();
-app.use(express.json({ limit: "16kb" }));
-
-// Internal API key — set in env, never exposed
+// ── env checks ────────────────────────────────────────────
 const INTERNAL_KEY = process.env.INTERNAL_API_KEY;
 if (!INTERNAL_KEY) {
-  console.error("❌ INTERNAL_API_KEY not set — refusing to start.");
+  console.error("❌ INTERNAL_API_KEY is not set — refusing to start.");
+  process.exit(1);
+}
+if (INTERNAL_KEY.length < 16) {
+  console.error("❌ INTERNAL_API_KEY must be at least 16 characters.");
   process.exit(1);
 }
 
+const PORT = Number(process.env.BOT_PORT || 4000);
+const HOST = process.env.BOT_HOST || "127.0.0.1";
+
+// ── app ───────────────────────────────────────────────────
+const app = express();
+app.disable("x-powered-by");
+app.use(express.json({ limit: "16kb" }));
+
+// no static, no UI, no trust proxy — this is internal
+
 function auth(req, res) {
-  if (req.headers["x-internal-key"] !== INTERNAL_KEY) {
-    return res.status(401).json({ error: "Unauthorized" });
+  const key = req.headers["x-internal-key"];
+  if (key !== INTERNAL_KEY) {
+    res.status(401).json({ error: "Unauthorized" });
+    return false;
   }
   return true;
 }
 
-// ── pairing ─────────────────────────────────────────────
-app.post("/internal/pair", async (req, res) => {
-  if (!auth(req, res)) return;
-  try {
-    if (!reserveSlot()) return res.status(503).json({ error: "At capacity" });
-
-    const phone = String(req.body.phone || "").replace(/\D/g, "");
-    if (!/^[1-9]\d{9,14}$/.test(phone)) {
-      return res.status(400).json({ error: "Invalid phone" });
-    }
-    const botName = String(req.body.botName || "").slice(0, 30);
-    const sessionId = crypto.randomBytes(16).toString("hex");
-
-    await saveSessionConfig(sessionId, {
-      botName: botName || CONFIG.BOT_NAME,
-      footer: CONFIG.FOOTER,
-      version: CONFIG.VERSION,
-      prefix: CONFIG.PREFIX,
-      ownerNumber: phone,
-      ownerName: CONFIG.OWNER_NAME,
-      workMode: CONFIG.WORK_MODE,
-      overrides: {},
-      global: { ...DEFAULT_GLOBAL },
-    });
-
-    const code = await requestPairingCode(sessionId, phone);
-    return res.json({ success: true, sessionId, code });
-  } catch (e) {
-    console.error("pair:", e.message);
-    return res.status(500).json({ error: e.message });
-  } finally {
-    releaseSlot();
-  }
+// tiny request logger
+app.use((req, _res, next) => {
+  logger.debug(`${req.method} ${req.path}`);
+  next();
 });
 
-// ── status ──────────────────────────────────────────────
-app.get("/internal/status/:id", (req, res) => {
+// ══════════════════════════════════════════════════════════════
+//  /internal/health
+// ══════════════════════════════════════════════════════════════
+app.get("/internal/health", (req, res) => {
   if (!auth(req, res)) return;
-  const s = sessions.get(req.params.id);
-  if (!s) return res.status(404).json({ error: "Unknown session" });
   res.json({
-    bot: s.config?.botName || CONFIG.BOT_NAME,
-    connected: !!s.conn?.user,
-    jid: s.conn?.user?.id || null,
-    socketReady: s.socketReady,
+    ok: true,
+    bot: CONFIG.BOT_NAME,
+    version: CONFIG.VERSION,
+    ...runtime.stats(),
+    commands: runtime.presenter.listCommands().length,
+    uptime: Math.floor(process.uptime()),
   });
 });
 
-// ── config ──────────────────────────────────────────────
-app.post("/internal/config/:id", async (req, res) => {
+// ══════════════════════════════════════════════════════════════
+//  /internal/pair
+// ══════════════════════════════════════════════════════════════
+app.post("/internal/pair", async (req, res) => {
   if (!auth(req, res)) return;
-  const s = sessions.get(req.params.id);
-  if (!s) return res.status(404).json({ error: "Unknown session" });
 
-  // ... same validation as before, call saveSessionConfig, update s.config ...
-  res.json({ success: true });
+  if (!runtime.reserveSlot()) {
+    return res.status(503).json({ error: "Server at capacity, try later" });
+  }
+
+  try {
+    const phone = String(req.body?.phone || "").replace(/[^0-9]/g, "");
+    if (phone.length < 10 || phone.length > 15 || !/^[1-9]\d{9,14}$/.test(phone)) {
+      return res.status(400).json({ error: "Invalid phone number" });
+    }
+    const botName = String(req.body?.botName || "").slice(0, 30);
+    const sessionId = crypto.randomBytes(16).toString("hex");
+
+    const result = await runtime.pair(sessionId, phone, botName);
+    return res.json(result);
+  } catch (e) {
+    logger.error({ err: e.message }, "pair failed");
+    return res.status(500).json({ error: e.message || "Pairing failed" });
+  } finally {
+    runtime.releaseSlot();
+  }
 });
 
-// ── commands (public view) ──────────────────────────────
+// ══════════════════════════════════════════════════════════════
+//  /internal/status/:sessionId
+// ══════════════════════════════════════════════════════════════
+app.get("/internal/status/:sessionId", (req, res) => {
+  if (!auth(req, res)) return;
+  const status = runtime.getStatus(req.params.sessionId);
+  if (!status) return res.status(404).json({ error: "Unknown session" });
+  res.json(status);
+});
+
+// ══════════════════════════════════════════════════════════════
+//  /internal/config/:sessionId
+// ══════════════════════════════════════════════════════════════
+app.post("/internal/config/:sessionId", async (req, res) => {
+  if (!auth(req, res)) return;
+  try {
+    const config = await runtime.updateConfig(req.params.sessionId, req.body || {});
+    res.json({ success: true, config });
+  } catch (e) {
+    const status = /unknown session/i.test(e.message) ? 404 : 400;
+    res.status(status).json({ error: e.message });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+//  /internal/commands  (public-safe view only)
+// ══════════════════════════════════════════════════════════════
 app.get("/internal/commands", (req, res) => {
   if (!auth(req, res)) return;
-  res.json(presenter.listCommands().filter(c => !c.hidden && !c.ownerOnly));
+  res.json(runtime.publicCommands());
 });
 
-// ── admin: reload ───────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+//  /internal/reload
+// ══════════════════════════════════════════════════════════════
 app.post("/internal/reload", async (req, res) => {
   if (!auth(req, res)) return;
-  await presenter._reload();
-  res.json({ success: true, count: presenter.listCommands().length });
+  try {
+    const count = await runtime.reloadCommands();
+    res.json({ success: true, commands: count });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-app.get("/internal/health", (req, res) => {
-  if (!auth(req, res)) return;
-  res.json({ ok: true, sessions: sessions.size });
+// ══════════════════════════════════════════════════════════════
+//  Fallback
+// ══════════════════════════════════════════════════════════════
+app.use((_req, res) => res.status(404).json({ error: "Not found" }));
+
+// ══════════════════════════════════════════════════════════════
+//  Boot
+// ══════════════════════════════════════════════════════════════
+const server = app.listen(PORT, HOST, () => {
+  console.log(`🤖 Bot server → http://${HOST}:${PORT}`);
+  console.log(`   Internal API key: ${INTERNAL_KEY.slice(0, 4)}…`);
 });
 
-// Loopback only — the public panel is in front
-app.listen(process.env.BOT_PORT || 4000, "127.0.0.1", () => {
-  console.log(`🤖 Bot server on 127.0.0.1:${process.env.BOT_PORT || 4000}`);
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(`❌ Port ${PORT} already in use.`);
+    process.exit(1);
+  }
+  console.error("Server error:", err);
+});
+
+// resume sessions + start reaper
+runtime.resumeSessions().catch((e) => logger.error({ err: e.message }, "resume"));
+runtime.startReaper();
+
+// graceful shutdown
+function shutdown(signal) {
+  console.log(`\n${signal} received — shutting down…`);
+  runtime.stopReaper();
+  for (const [sid, s] of runtime.sessions.entries()) {
+    try { s.conn?.end?.(undefined); } catch {}
+    runtime.sessions.delete(sid);
+  }
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled Rejection:", reason);
 });
