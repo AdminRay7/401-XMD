@@ -107,7 +107,7 @@ function bareJid(s) {
 // ================= MAIN HANDLER =================
 async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
     let from = null;
-    let composedTyping = false;
+    let sentPresence = false;
 
     try {
         if (!conn || !m || !m.messages || !m.messages[0]) return;
@@ -122,7 +122,6 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
         if (type === 'senderKeyDistributionMessage' ||
             (type === 'protocolMessage' && !msg.message.protocolMessage.type)) return;
 
-        // Session config safety — never undefined
         sessionConfig = sessionConfig || {};
 
         const sender = msg.key.participant || msg.key.remoteJid;
@@ -136,13 +135,12 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
         const currentBotName = sessionConfig.botName || config.BOT_NAME || "Bot";
 
         const isCmd = text && currentPrefix.length > 0 && text.startsWith(currentPrefix);
-        // Parse after prefix — args stay consistent for spaced prefixes
         const afterPrefix = isCmd ? text.slice(currentPrefix.length).trim() : '';
         const parts = afterPrefix ? afterPrefix.split(/\s+/) : [];
         const command = (parts[0] || '').toLowerCase();
         const args = parts.slice(1);
 
-        // 🌟 MULTI-USER OWNER DETECTION
+        // 🌟 OWNER DETECTION
         const senderBare     = bareJid(sender);
         const sessionJid     = conn.user?.id || '';
         const sessionBare    = bareJid(sessionJid);
@@ -171,36 +169,31 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
 
         try { loadCommands(false); } catch {}
 
-        // 🌟 Per-message reply closure (no conn mutation → no race)
+        // 🌟 Per-message closures (no conn mutation → no race)
         const reply = (t, opts = {}) =>
             conn.sendMessage(from, { text: String(t) }, { quoted: msg, ...opts });
 
-        // Attach convenience fields to msg only (per-invocation object)
+        const typing = async () => {
+            try {
+                await conn.sendPresenceUpdate('composing', from);
+                sentPresence = true;
+            } catch {}
+        };
+
         msg.body = text;
         msg.text = text;
         msg.sender = sender;
 
-        // 🌟 SINGLE cmdCtx OBJECT — commands destructure from this
+        // 🌟 SINGLE cmdCtx OBJECT
         const cmdCtx = {
-            // Identity
             from, sender, senderBare, sessionBare, ownerCfgBare,
             pushname, sessionId, isGroup, isFromMe,
-
-            // Permissions
             isOwner, isGlobalOwner: isGlobalOwner(sender), isGroupAdmin,
-
-            // Content
             body: text, text, args, command, isCmd,
             prefix: currentPrefix, botName: currentBotName,
-
-            // Session
             config: sessionConfig,
-
-            // Connections
             conn, msg,
-
-            // Helpers
-            reply,
+            reply, typing,
             react: (emoji) => conn.sendMessage(from, { react: { text: emoji, key: msg.key } }),
             groupMetadata: () => conn.groupMetadata(from),
             saveConfig: async (patch) => {
@@ -212,13 +205,10 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
             }
         };
 
-        // TYPING INDICATOR
+        // TYPING INDICATOR (auto)
         const autoTyping = sessionConfig.AUTO_TYPING ?? config.AUTO_TYPING;
         if (isCmd && autoTyping && !isFromMe) {
-            try {
-                await conn.sendPresenceUpdate('composing', from);
-                composedTyping = true;
-            } catch {}
+            await typing();
         }
 
         // AUTO ENFORCEMENT LAYER
@@ -235,16 +225,13 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
             }
         }
 
-        // Skip single-digit replies (poll/vote flows)
-        if (!isCmd && /^[0-9]$/.test(text.trim())) {
-            return;
-        }
+        if (!isCmd && /^[0-9]$/.test(text.trim())) return;
 
         // EXECUTE COMMAND
         if (isCmd) {
             const handler = commandCache.get(command);
             if (handler) {
-                // 🔒 ENFORCE METADATA FLAGS
+                // 🔒 METADATA ENFORCEMENT
                 if (handler.ownerOnly && !isOwner) {
                     return reply("🔒 This command is owner-only.");
                 }
@@ -261,7 +248,6 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
                 const execFn = handler.execute || handler.run;
                 if (typeof execFn === 'function') {
                     try {
-                        // 🌟 SINGLE-ARG CALL: execFn(cmdCtx)
                         await execFn(cmdCtx);
                     } catch (e) {
                         console.error(`Cmd "${command}":`, e.message);
@@ -274,7 +260,7 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
     } catch (err) {
         console.error("Handler Error:", err?.message || err);
     } finally {
-        if (conn && from && composedTyping) {
+        if (conn && from && sentPresence) {
             try { await conn.sendPresenceUpdate('paused', from); } catch {}
         }
     }
@@ -316,17 +302,26 @@ module.exports = {
     getCommandCache: () => commandCache,
     getAutoCache: () => autoCache,
     reloadCommands: async () => loadCommands(true),
-    listCommands: () => Array.from(new Set(commandCache.values())).map(c => ({
-        name: c.name || "unknown",
-        aliases: Array.isArray(c.aliases) ? c.aliases : [],
-        category: c.category || "general",
-        description: c.description || "",
-        ownerOnly: !!c.ownerOnly,
-        adminOnly: !!c.adminOnly,
-        groupOnly: !!c.groupOnly,
-        privateOnly: !!c.privateOnly,
-        hidden: !!c.hidden,
-        usage: c.usage || ""
-    })),
+
+    // 🌟 Trimmed: only what the menu needs (no aliases/description/usage)
+    listCommands: () => {
+        const seen = new Set();
+        const out = [];
+        for (const c of commandCache.values()) {
+            if (seen.has(c)) continue;
+            seen.add(c);
+            out.push({
+                name: c.name || "unknown",
+                category: c.category || "general",
+                ownerOnly: !!c.ownerOnly,
+                adminOnly: !!c.adminOnly,
+                groupOnly: !!c.groupOnly,
+                privateOnly: !!c.privateOnly,
+                hidden: !!c.hidden
+            });
+        }
+        return out;
+    },
+
     _reload: async () => loadCommands(true)
 };
