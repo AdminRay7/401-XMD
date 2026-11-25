@@ -1,5 +1,5 @@
 // ============================================================
-//   303-XMD — presenter.js (Fully Fixed)
+//   303-XMD — presenter.js (Perfect Multi-User Fix)
 // ============================================================
 const fs = require('fs-extra');
 const path = require('path');
@@ -155,21 +155,24 @@ async function handleMessage({ conn, m, sessionId, config: sessionConfig }) {
 
         try { loadCommands(false); } catch {}
 
-        // 🌟 FIX: INJECT THE REPLY FUNCTION INTO CONTEXT
-        const replyFunc = (t, opts = {}) => conn.sendMessage(from, { text: String(t) }, { quoted: msg, ...opts });
-        const reactFunc = (emoji) => conn.sendMessage(from, { react: { text: emoji, key: msg.key } });
+        // 🌟 FIX: INJECT PROPERTIES DIRECTLY INTO CONN & MSG
+        // Many older plugins read conn.botName, conn.prefix, or msg.body directly.
+        conn.botName = currentBotName;
+        conn.prefix = currentPrefix;
+        conn.config = sessionConfig;
+        conn.reply = (t, opts = {}) => conn.sendMessage(from, { text: String(t) }, { quoted: msg, ...opts });
         
-        // Fallback for older commands calling conn.reply
-        conn.reply = replyFunc;
-        conn.react = reactFunc;
+        msg.body = text;
+        msg.text = text;
+        msg.sender = sender;
 
         const cmdCtx = {
             from, sender, isOwner, isGlobalOwner: isGlobalOwner(sender), isGroupAdmin, pushname, config: sessionConfig, conn, msg,
-            sessionId, isGroup, body: text, args, command,
+            sessionId, isGroup, body: text, text: text, args, command,
             prefix: currentPrefix, botName: currentBotName, isCmd,
             senderBare, sessionBare, ownerCfgBare,
-            reply: replyFunc,
-            react: reactFunc,
+            reply: conn.reply,
+            react: (emoji) => conn.sendMessage(from, { react: { text: emoji, key: msg.key } }),
             groupMetadata: () => conn.groupMetadata(from),
             saveConfig: async (patch) => {
                 const db = require("./db");
